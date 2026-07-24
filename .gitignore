@@ -1,0 +1,29 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.uv-cache/
+
+# Runtime databases and SQLite sidecars
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/.stock_update.lock
+data/documents/
+data/current_shadow/
+data/model_artifacts/
+
+# Runtime output
+logs/
+*.log
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
