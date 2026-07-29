@@ -64,7 +64,6 @@ class Settings:
     llm_backoff_seconds: float = _positive_float("LLM_BACKOFF_SECONDS", 0.75)
     llm_circuit_failure_threshold: int = _positive_int("LLM_CIRCUIT_FAILURE_THRESHOLD", 3)
     llm_circuit_recovery_seconds: float = _positive_float("LLM_CIRCUIT_RECOVERY_SECONDS", 60.0)
-
     @property
     def llm_configured(self) -> bool:
         return bool(self.llm_base_url and self.llm_api_key and self.quick_model)

@@ -5,6 +5,10 @@ from pathlib import Path
 
 from app.data_access import StockRepository
 from app.paper_trading import PAPER_BENCHMARKS, PaperExecutionService, PaperTradingService
+from app.paper_strategies import (
+    LIGHTGBM_SHADOW_STRATEGY_ID,
+    MULTIFACTOR_LINEAR_STRATEGY_ID,
+)
 from app.research_assessment import (
     RESEARCH_ASSESSMENT_POLICY_VERSION,
     RESEARCH_ASSESSMENT_SCHEMA_VERSION,
@@ -113,6 +117,61 @@ def _set_assessment_signal(store: ResearchStore, code: str, signal: str) -> None
         )
 
 
+def test_accounts_bind_independent_strategy_contracts(tmp_path):
+    service, _ = _service(tmp_path)
+
+    default = service.default_account()
+    multifactor = service.create_account(
+        "线性多因子组合", 2_000_000, "000300.SH", MULTIFACTOR_LINEAR_STRATEGY_ID
+    )
+
+    assert default["strategy_id"] == LIGHTGBM_SHADOW_STRATEGY_ID
+    assert default["strategy"]["signal_source"] == "current_shadow"
+    assert multifactor["strategy_id"] == MULTIFACTOR_LINEAR_STRATEGY_ID
+    assert multifactor["strategy"]["signal_source"] == "multifactor_linear"
+    assert {item["account_id"] for item in service.list_accounts()} == {
+        default["account_id"], multifactor["account_id"],
+    }
+    assert {item["strategy_id"] for item in service.list_strategies()} == {
+        LIGHTGBM_SHADOW_STRATEGY_ID, MULTIFACTOR_LINEAR_STRATEGY_ID,
+    }
+
+
+def test_multifactor_account_uses_factor_ranking_not_lightgbm_shadow(tmp_path):
+    service, store = _service(tmp_path)
+    lightgbm = service.default_account()
+    multifactor = service.create_account(
+        "线性多因子组合", 1_000_000, "000300.SH", MULTIFACTOR_LINEAR_STRATEGY_ID
+    )
+    with store.connect() as conn:
+        conn.execute(
+            """UPDATE security_factor_snapshot
+               SET return_20d=0, return_60d=0, max_drawdown_250d=-0.5,
+                   range_position_52w=0.2, volatility_60d=0.2
+               WHERE snapshot_id='factor-1' AND security_code='000001.SZ'"""
+        )
+        conn.execute(
+            """UPDATE security_factor_snapshot
+               SET return_20d=0.8, return_60d=0.8, max_drawdown_250d=-0.1,
+                   range_position_52w=0.9, volatility_60d=0.4
+               WHERE snapshot_id='factor-1' AND security_code='000002.SZ'"""
+        )
+
+    light_targets = service.research_targets(
+        as_of="2026-07-20", account_id=lightgbm["account_id"], limit=1
+    )
+    factor_targets = service.research_targets(
+        as_of="2026-07-20", account_id=multifactor["account_id"], limit=1
+    )
+    factor_run = service.create_daily_run(
+        as_of="2026-07-20", account_id=multifactor["account_id"],
+        top_n=1, hold_rank_buffer=30,
+    )
+
+    assert light_targets["targets"][0]["security_code"] == "000001.SZ"
+    assert factor_targets["targets"][0]["security_code"] == "000002.SZ"
+    assert factor_run["strategy_version"] == "multifactor_linear_v1@1.0.0"
+    assert factor_run["config"]["target_gross_exposure"] == 0.80
 def _insert_position(
     service: PaperTradingService,
     store: ResearchStore,
@@ -139,7 +198,15 @@ class RealtimeProvider:
 
     def get_realtime_quotes(self, codes):
         self.requested = list(codes)
-        prices = {"000001.SZ": 13.0, "000300.SH": 4100.0}
+        prices = {
+            "000001.SZ": 13.0,
+            "000001.SH": 100.0,
+            "000300.SH": 101.0,
+            "399001.SZ": 102.0,
+            "399006.SZ": 103.0,
+            "000688.SH": 104.0,
+            "000510.CSI": 105.0,
+        }
         return [{
             "security_code": code, "quote_time": self.quote_time,
             "open": prices[code], "latest": prices[code] + 0.1,
@@ -183,6 +250,22 @@ def test_portfolio_planning_does_not_mutate_paper_account_state(tmp_path):
         after = {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
     assert plan["orders"]
     assert after == before
+
+
+def test_portfolio_sources_select_requested_date_when_newer_factor_snapshot_exists(tmp_path):
+    service, store = _service(tmp_path)
+    now = "2026-07-21T08:00:00+00:00"
+    with store.connect() as conn:
+        conn.execute(
+            """INSERT INTO factor_snapshot VALUES
+            ('factor-newer','2026-07-21','test','new-fp',1,1,'completed',2,2,0,?,?,NULL)""",
+            (now, now),
+        )
+
+    factor, shadow = service.portfolio_decision.sources("2026-07-20")
+
+    assert factor["snapshot_id"] == "factor-1"
+    assert shadow["snapshot_id"] == "shadow-1"
 
 
 def test_execution_service_persists_supplied_portfolio_plan(tmp_path):
@@ -291,9 +374,11 @@ def test_benchmark_comparison_uses_common_inception_and_aligned_nav_dates(tmp_pa
     service._mark_nav(service.account(account["account_id"]), "2026-07-22")
     latest_closes = {
         "000001.SH": 101.0,
+        "000300.SH": 100.5,
         "399001.SZ": 102.0,
         "399006.SZ": 98.0,
-        "000300.SH": 100.5,
+        "000688.SH": 103.0,
+        "000510.CSI": 99.0,
     }
     rows = []
     for code in PAPER_BENCHMARKS:
@@ -305,7 +390,7 @@ def test_benchmark_comparison_uses_common_inception_and_aligned_nav_dates(tmp_pa
     saved = service.save_benchmark_prices(account["account_id"], rows)
     comparison = service.dashboard(account["account_id"], "2026-07-20")["benchmark_comparison"]
 
-    assert saved["rows_written"] == 12
+    assert saved["rows_written"] == 18
     assert comparison["status"] == "complete"
     assert comparison["inception_date"] == "2026-07-21"
     assert comparison["as_of"] == "2026-07-22"
@@ -315,6 +400,50 @@ def test_benchmark_comparison_uses_common_inception_and_aligned_nav_dates(tmp_pa
     assert round(shanghai["latest_return"], 10) == 0.01
     assert round(shanghai["excess_return"], 10) == 0.01
     assert shanghai["coverage"] == 1.0
+
+
+def test_benchmark_comparison_adds_intraday_points_without_overwriting_daily_prices(tmp_path):
+    provider = RealtimeProvider()
+    service, store = _service(tmp_path, provider)
+    account = service.default_account()
+    service._mark_nav(account, "2026-07-20")
+    run = service.create_daily_run(
+        as_of="2026-07-20", account_id=account["account_id"], top_n=1, hold_rank_buffer=30
+    )
+    with store.connect() as conn:
+        conn.execute(
+            """UPDATE paper_order SET status='filled', fill_date='2026-07-21', fill_price=11
+               WHERE order_id=?""",
+            (run["orders"][0]["order_id"],),
+        )
+        conn.execute(
+            "UPDATE paper_account SET cash=1010000 WHERE account_id=?",
+            (account["account_id"],),
+        )
+    service._mark_nav(service.account(account["account_id"]), "2026-07-21")
+    service.save_benchmark_prices(account["account_id"], [
+        {"thscode": code, "time": trading_date, "close": close}
+        for code in PAPER_BENCHMARKS
+        for trading_date, close in (("2026-07-20", 100.0), ("2026-07-21", 100.5))
+    ])
+
+    refreshed = service.refresh_realtime_quotes(account["account_id"])
+    comparison = service.dashboard(account["account_id"], "2026-07-21")["benchmark_comparison"]
+
+    assert len(refreshed["quotes"]) == 6
+    assert comparison["status"] == "live"
+    assert comparison["valuation_mode"] == "intraday"
+    assert comparison["as_of"] == "2026-07-23"
+    assert comparison["latest_quote_time"] == "2026-07-23 10:01:02+08:00"
+    assert comparison["portfolio"]["points"][-1]["date"] == "2026-07-23"
+    assert {item["code"] for item in comparison["benchmarks"]} == set(PAPER_BENCHMARKS)
+    assert all(item["points"][-1]["date"] == "2026-07-23" for item in comparison["benchmarks"])
+    assert all(item["latest_source"] == "iFinD THS_RQ" for item in comparison["benchmarks"])
+    with store.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM paper_benchmark_price WHERE account_id=?",
+            (account["account_id"],),
+        ).fetchone()[0] == 12
 
 
 def test_benchmark_comparison_rejects_missing_inception_as_partial(tmp_path):
@@ -450,7 +579,7 @@ def test_realtime_refresh_persists_quote_and_settles_at_official_open(tmp_path):
 
     result = service.settle_realtime()
 
-    assert set(provider.requested) == {"000001.SZ", "000300.SH"}
+    assert set(provider.requested) == {"000001.SZ", *PAPER_BENCHMARKS}
     assert result["filled"][0]["fill_date"] == "2026-07-23"
     assert result["filled"][0]["fill_price"] > 13.0
     assert result["filled"][0]["execution_quote_id"]
@@ -459,7 +588,7 @@ def test_realtime_refresh_persists_quote_and_settles_at_official_open(tmp_path):
     assert dashboard["positions"][0]["close"] == 13.1
     assert dashboard["positions"][0]["price_source"] == "iFinD THS_RQ"
     with store.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM paper_realtime_quote").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM paper_realtime_quote").fetchone()[0] == 7
 
 
 def test_realtime_settlement_rejects_order_approved_after_market_open(tmp_path):

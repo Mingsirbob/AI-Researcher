@@ -3,6 +3,10 @@
 
 # Python
 __pycache__/
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
@@ -17,6 +21,7 @@ data/.stock_update.lock
 data/documents/
 data/current_shadow/
 data/model_artifacts/
+data/backups/
 
 # Runtime output
 logs/

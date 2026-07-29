@@ -69,14 +69,15 @@ python run.py
 检查计划：
 
 ```powershell
-python scripts/build_adjusted_stock_data.py --adjustment forward --dry-run
+python scripts/build_adjusted_stock_data.py --adjustment forward --universe csi300 --start-date 2020-01-01 --dry-run
 python scripts/build_adjusted_stock_data.py --adjustment backward --dry-run
 ```
 
 构建用于 Qlib 的前复权库：
 
 ```powershell
-python scripts/build_adjusted_stock_data.py --adjustment forward
+python scripts/build_adjusted_stock_data.py --adjustment forward --universe csi300 --start-date 2020-01-01
+python scripts/audit_adjusted_stock_data.py
 ```
 
 如需后复权库：
@@ -84,6 +85,25 @@ python scripts/build_adjusted_stock_data.py --adjustment forward
 ```powershell
 python scripts/build_adjusted_stock_data.py --adjustment backward
 ```
+
+运行 M11.2 前复权因子评价：
+
+```powershell
+python scripts/run_factor_evaluation.py --start-date 2021-01-01 --end-date 2026-07-24 --rebalance-step 20 --horizons 1 5 20 --layers 5
+```
+
+相同的行情文件指纹、因子版本和参数会复用已有评价，不重复计算。结果只用于因子研究；当前股票池为查询时点的沪深300，存在幸存者偏差，不能解释成完整指数增强回测。
+
+### M11.3 单因子策略回测
+
+```powershell
+conda activate quant
+python scripts/run_factor_backtest.py --factor-id volume_ratio_20d --start-date 2021-01-01 --end-date 2026-07-24 --top-n 30 --rebalance-step 20
+```
+
+默认按信号日收盘计算、下一交易日开盘成交，模拟 `0.03%` 佣金、卖出 `0.05%` 印花税和 `0.10%` 固定滑点。CLI 默认只输出运行摘要；需要逐日净值和全部调仓时增加 `--full`。相同评价、因子、行情指纹和参数会复用不可变结果。
+
+当前基准为“当前沪深300等权代理”，不是官方沪深300指数。回测存在当前成分股幸存者偏差，且尚未完整处理历史涨跌停、100股整手、最低佣金与冲击成本，因此不得直接用于实盘收益宣传或自动发布因子。
 
 ## 4. 手工增量更新
 
@@ -396,6 +416,35 @@ GET /api/decision-outcomes/attribution
 2026-07-22 已使用真实 iFinD 行情评价宁德时代 `2026-07-20 / 60d / 沪深300` 案例。结果为 `pending`，已观察 `2 / 60` 个交易日，剩余 58 个交易观察；系统没有展示部分收益。预计需到 2026 年 10 月附近才能成熟，实际日期以交易日观察数为准。
 
 下一工程项定义为 **M8.1 案例批次与到期扫描**：增加预设分位抽样清单、批次标识、到期队列、批量手工评价和批次级归因。M8.1 尚未实现，不能把当前逐案例手工操作描述为已经具备批量能力。
+
+## 12.5 M11.4 因子 Shadow 发布
+
+进入“量化实验室 → 因子库”，发布区自动读取最近一次 M11.2 评价和 M11.3 回测。确认二者绑定同一因子版本后，阅读并勾选回测边界，点击“建立发布候选”。系统只生成不可变候选并运行门禁，不会立即改变因子状态。
+
+等价 API：
+
+```text
+POST /api/factor-lab/releases
+{
+  "factor_id": "volume_ratio_20d",
+  "factor_version": 2,
+  "evaluation_id": "...",
+  "backtest_id": "...",
+  "limitations_acknowledged": true,
+  "created_by": "human"
+}
+```
+
+查询及人工决定：
+
+```text
+GET  /api/factor-lab/releases/latest
+GET  /api/factor-lab/releases/{release_id}
+POST /api/factor-lab/releases/{release_id}/approve
+POST /api/factor-lab/releases/{release_id}/reject
+```
+
+`gate_failed` 不能批准，只能拒绝或先调整因子/策略后重新评价、回测并建立新候选。`gate_passed` 仍需人工输入审查说明；批准后因子只进入 `shadow`，不得把它解释为模型已经使用或允许进入模拟盘。当前量比基线应因平均换手和累计成本率超限而失败。
 
 ## 13. M9-lite 风险预算模拟盘
 

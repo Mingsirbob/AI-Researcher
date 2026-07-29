@@ -703,6 +703,87 @@ class ResearchStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def security_at(self, code: str, as_of: str) -> dict | None:
+        item = self.security(code)
+        if item is None:
+            return None
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT attribute_name, attribute_value, effective_from, effective_to,
+                          observed_at, source
+                   FROM security_attribute_history
+                   WHERE security_code=?
+                     AND COALESCE(effective_from, substr(observed_at, 1, 10))<=?
+                     AND (effective_to IS NULL OR effective_to>=?)
+                   ORDER BY attribute_name, COALESCE(effective_from, observed_at) DESC,
+                            observed_at DESC""",
+                (normalize_code(code), as_of, as_of),
+            ).fetchall()
+        attributes: dict[str, dict] = {}
+        for row in rows:
+            if row["attribute_name"] not in attributes:
+                attributes[row["attribute_name"]] = dict(row)
+        for name, value in attributes.items():
+            item[name] = value["attribute_value"]
+        item["as_of"] = as_of
+        item["attribute_history"] = attributes
+        return item
+
+    def search_document_chunks(
+        self, code: str, query: str, *, as_of: str | None = None, limit: int = 20
+    ) -> dict:
+        terms = assistant_query_terms(query)
+        if not terms:
+            return {"items": [], "query": query, "retrieval_method": "empty_query"}
+        normalized = normalize_code(code)
+        capped = max(1, min(limit, 100))
+        date_sql = "AND COALESCE(a.published_at, a.report_date)<=?" if as_of else ""
+        date_params = [as_of + " 23:59:59" if as_of and len(as_of) == 10 else as_of] if as_of else []
+        rows = []
+        method = "like_fallback"
+        if self.fts_available:
+            expression = " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms[:12])
+            try:
+                with self.connect() as conn:
+                    rows = conn.execute(
+                        f"""SELECT c.chunk_id, c.document_id, c.page_start, c.page_end,
+                                   c.text, a.title, a.published_at, a.report_date,
+                                   bm25(document_chunk_fts, 0.0, 0.0, 6.0, 1.0) AS rank
+                            FROM document_chunk_fts
+                            JOIN document_chunk c ON c.chunk_id=document_chunk_fts.chunk_id
+                            JOIN announcement_document d ON d.document_id=c.document_id
+                            JOIN announcement a ON a.announcement_id=d.announcement_id
+                            WHERE document_chunk_fts MATCH ?
+                              AND document_chunk_fts.security_code=? {date_sql}
+                            ORDER BY rank, COALESCE(a.published_at, a.report_date) DESC
+                            LIMIT ?""",
+                        [expression, normalized, *date_params, capped],
+                    ).fetchall()
+                method = "fts5_bm25"
+            except sqlite3.OperationalError:
+                rows = []
+        if not rows:
+            likes = " OR ".join("c.text LIKE ? OR a.title LIKE ?" for _ in terms)
+            params: list[object] = [normalized]
+            for term in terms:
+                params.extend([f"%{term}%", f"%{term}%"])
+            with self.connect() as conn:
+                rows = conn.execute(
+                    f"""SELECT c.chunk_id, c.document_id, c.page_start, c.page_end,
+                               c.text, a.title, a.published_at, a.report_date, 0.0 AS rank
+                        FROM document_chunk c
+                        JOIN announcement_document d ON d.document_id=c.document_id
+                        JOIN announcement a ON a.announcement_id=d.announcement_id
+                        WHERE a.security_code=? AND ({likes}) {date_sql}
+                        ORDER BY COALESCE(a.published_at, a.report_date) DESC LIMIT ?""",
+                    [*params, *date_params, capped],
+                ).fetchall()
+        return {
+            "query": query,
+            "retrieval_method": method,
+            "items": [{**dict(row), "retrieval_score": -float(row["rank"] or 0)} for row in rows],
+        }
+
     def market_data_end(self) -> str | None:
         with self.connect() as conn:
             return conn.execute(

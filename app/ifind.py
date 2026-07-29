@@ -73,7 +73,7 @@ class IFindService:
         else:
             reason = "ready"
         return {
-            "configured": sdk_available and self.settings.ifind_credentials_configured,
+            "configured": self.settings.ifind_credentials_configured,
             "sdk_available": sdk_available,
             "username_configured": bool(self.settings.ifind_username),
             "password_configured": bool(self.settings.ifind_password),

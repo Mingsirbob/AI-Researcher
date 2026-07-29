@@ -42,7 +42,7 @@ DAILY_COLUMNS = ("time", "thscode", "open", "high", "low", "close", "vwap", "vol
 REQUIRED_COLUMNS = set(DAILY_COLUMNS)
 MAX_ABSOLUTE_DAILY_RETURN = 0.60
 PRICE_COMPARISON_REL_TOLERANCE = 1e-8
-PRICE_COMPARISON_ABS_TOLERANCE = 1e-8
+PRICE_COMPARISON_ABS_TOLERANCE = 1e-4
 RETRYABLE_IFIND_CATEGORIES = {
     "timeout",
     "rate_limit",
@@ -128,6 +128,37 @@ def normalize_daily_frame(frame: pd.DataFrame) -> pd.DataFrame:
         raise DataContractError(f"iFinD 日线结果包含重复证券日期：{sample}")
     normalized.sort_values(["thscode", "time"], inplace=True)
     return normalized
+
+
+def align_adjusted_daily_fields(
+    adjusted: pd.DataFrame,
+    unadjusted: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict]:
+    """Align vendor VWAP with adjusted OHLC while retaining real traded volume."""
+    keys = ["time", "thscode"]
+    raw = unadjusted[keys + ["close", "vwap", "volume"]].rename(
+        columns={"close": "raw_close", "vwap": "raw_vwap", "volume": "raw_volume"}
+    )
+    merged = adjusted.merge(raw, on=keys, how="left", validate="one_to_one")
+    ratio = pd.to_numeric(merged["close"], errors="coerce") / pd.to_numeric(
+        merged["raw_close"], errors="coerce"
+    )
+    scaled_vwap = pd.to_numeric(merged["raw_vwap"], errors="coerce") * ratio
+    original_vwap = pd.to_numeric(merged["vwap"], errors="coerce")
+    merged["vwap"] = scaled_vwap.where(scaled_vwap.notna(), original_vwap)
+    merged["volume"] = pd.to_numeric(merged["volume"], errors="coerce").where(
+        pd.to_numeric(merged["volume"], errors="coerce").notna(),
+        pd.to_numeric(merged["raw_volume"], errors="coerce"),
+    )
+    eligible = pd.to_numeric(merged["close"], errors="coerce").notna()
+    scaled = eligible & scaled_vwap.notna()
+    summary = {
+        "method": "raw_vwap * adjusted_close / raw_close",
+        "eligible_rows": int(eligible.sum()),
+        "scaled_rows": int(scaled.sum()),
+        "scaled_coverage": float(scaled.sum() / eligible.sum()) if eligible.any() else 0.0,
+    }
+    return merged[list(DAILY_COLUMNS)].copy(), summary
 
 
 def validate_daily_frame(

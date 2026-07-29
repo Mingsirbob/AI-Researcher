@@ -5,13 +5,14 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from .analysis import analyze_stock
 from .config import ROOT, settings
 from .data_access import StockRepository, normalize_code
+from .frontend_cutover import build_frontend_status, production_frontend_response
 from .llm import (
     deterministic_report,
     generate_ai_report,
@@ -20,6 +21,11 @@ from .llm import (
 )
 from .monitoring import build_monitor_evaluations, run_artifacts
 from .quant import FactorSnapshotService
+from .quant_research import neutralize_factor, universe_membership
+from .factor_lab import FactorLabService
+from .factor_evaluation import FactorEvaluationService
+from .factor_backtest import FactorBacktestService
+from .factor_release import FactorReleaseService
 from .ifind import IFindError, IFindService
 from .announcement_pipeline import AnnouncementPipeline
 from .financial_extraction import build_financial_change_template
@@ -49,6 +55,8 @@ from .schemas import (
     DecisionCaseCreate,
     DecisionCaseReview,
     DecisionOutcomeEvaluate,
+    DecisionOutcomeBatchEvaluate,
+    FactorNeutralizationRequest,
     PaperAccountCreate,
     PaperBenchmarkRefresh,
     PaperDailyBatchRequest,
@@ -59,6 +67,13 @@ from .schemas import (
     PaperSettleRequest,
     ClaimEvaluationConfirm,
     FactorSnapshotRequest,
+    FactorDefinitionCreate,
+    FactorLifecycleChange,
+    FactorLabSnapshotRequest,
+    FactorEvaluationRequest,
+    FactorBacktestRequest,
+    FactorReleaseCreate,
+    FactorReleaseDecision,
     FinancialChangeTemplateRequest,
     ResearchRequest,
     ResearchRunRequest,
@@ -78,6 +93,27 @@ research_store = ResearchStore(settings.state_db, settings.document_root)
 company_research_service = CompanyResearchService(repo, research_store, settings)
 announcement_pipeline = AnnouncementPipeline(research_store, ifind_service)
 factor_snapshot_service = FactorSnapshotService(repo, research_store)
+factor_lab_repository = (
+    StockRepository(settings.stock_qfq_db) if settings.stock_qfq_db.exists() else repo
+)
+factor_lab_service = FactorLabService(
+    research_store,
+    factor_lab_repository,
+    adjustment="CPS:2" if settings.stock_qfq_db.exists() else "unadjusted",
+    universe="CSI300 current" if settings.stock_qfq_db.exists() else "A-share local coverage",
+)
+factor_evaluation_service = (
+    FactorEvaluationService(research_store, factor_lab_repository, factor_lab_service)
+    if settings.stock_qfq_db.exists() else None
+)
+factor_backtest_service = (
+    FactorBacktestService(
+        research_store, factor_lab_repository, factor_lab_service,
+        factor_evaluation_service,
+    )
+    if factor_evaluation_service else None
+)
+factor_release_service = FactorReleaseService(research_store)
 evidence_acceptance_service = EvidenceAcceptanceService(
     research_store, ROOT / "data" / "acceptance" / "evidence_acceptance_v1.json"
 )
@@ -191,8 +227,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Evidence AI Research", version="0.9.0", lifespan=lifespan)
-static_dir = ROOT / "app" / "static"
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+frontend_dist = ROOT / "frontend" / "dist"
+if (frontend_dist / "assets").is_dir():
+    app.mount(
+        "/next/assets",
+        StaticFiles(directory=frontend_dist / "assets"),
+        name="next-assets",
+    )
 
 
 def build_analysis(code: str, as_of: str | None = None) -> dict:
@@ -206,15 +247,32 @@ def build_analysis(code: str, as_of: str | None = None) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+def frontend_cutover_status() -> dict:
+    return build_frontend_status(frontend_dist=frontend_dist)
+
+
 @app.get("/", include_in_schema=False)
-def index() -> FileResponse:
-    return FileResponse(static_dir / "index.html")
+def index() -> Response:
+    return production_frontend_response(frontend_dist=frontend_dist)
+
+
+@app.get("/next", include_in_schema=False)
+@app.get("/next/{path:path}", include_in_schema=False)
+def next_index(path: str = "") -> FileResponse:
+    index_file = frontend_dist / "index.html"
+    if not index_file.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail="Vue 前端尚未构建，请先在 frontend 目录运行 npm install && npm run build",
+        )
+    return FileResponse(index_file)
 
 
 @app.get("/api/health")
 def health() -> dict:
     return {
         "status": "ok",
+        "frontend": frontend_cutover_status(),
         "securities": repo.security_count,
         "llm_configured": settings.llm_configured,
         "llm": {
@@ -231,6 +289,33 @@ def health() -> dict:
 def securities(q: str = "", limit: int = Query(12, ge=1, le=50)) -> dict:
     items = research_store.list_securities(q, limit)
     return {"items": items or repo.list_securities(q, limit), "total_covered": repo.security_count}
+
+
+@app.get("/api/securities/{code}/master")
+def security_master(code: str, as_of: str | None = None) -> dict:
+    item = research_store.security_at(code, as_of) if as_of else research_store.security(code)
+    if item is None:
+        raise HTTPException(status_code=404, detail="证券主数据不存在")
+    return item
+
+
+@app.get("/api/market/universe-membership")
+def market_universe_membership(as_of: str, universe: str | None = None) -> dict:
+    try:
+        date.fromisoformat(as_of)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="as_of 必须是 YYYY-MM-DD") from exc
+    return universe_membership(settings.stock_qfq_db, as_of=as_of, universe=universe)
+
+
+@app.post("/api/quant/neutralize")
+def factor_neutralization(request: FactorNeutralizationRequest) -> dict:
+    return neutralize_factor(
+        request.rows,
+        factor_key=request.factor_key,
+        industry_key=request.industry_key,
+        market_cap_key=request.market_cap_key,
+    )
 
 
 @app.get("/api/stocks/{code}/analysis")
@@ -379,6 +464,16 @@ def announcement_evidence(
             normalized, as_of=as_of, query=q, limit=limit
         )
     }
+
+
+@app.get("/api/stocks/{code}/evidence-search")
+def evidence_search(
+    code: str,
+    q: str = Query(min_length=1, max_length=500),
+    as_of: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+) -> dict:
+    return research_store.search_document_chunks(code, q, as_of=as_of, limit=limit)
 
 
 @app.post("/api/document-assistant")
@@ -604,6 +699,225 @@ def factor_snapshot_securities(
     return result
 
 
+@app.get("/api/factor-lab/overview")
+def factor_lab_overview() -> dict:
+    return factor_lab_service.overview()
+
+
+@app.get("/api/factor-lab/templates")
+def factor_lab_templates() -> dict:
+    return {"items": factor_lab_service.templates()}
+
+
+@app.get("/api/factor-lab/factors")
+def factor_lab_factors(
+    status: str | None = Query(
+        None, pattern="^(draft|testing|shadow|approved|deprecated)$"
+    ),
+) -> dict:
+    return {"items": factor_lab_service.list_factors(status)}
+
+
+@app.post("/api/factor-lab/factors")
+def create_factor_definition(request: FactorDefinitionCreate) -> dict:
+    try:
+        return {
+            "item": factor_lab_service.create_factor(
+                factor_id=request.factor_id,
+                name=request.name,
+                description=request.description,
+                template_id=request.template_id,
+                window=request.window,
+                direction=request.direction,
+                owner=request.owner,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/factor-lab/factors/{factor_id}/versions/{version}/status")
+def change_factor_lifecycle(
+    factor_id: str, version: int, request: FactorLifecycleChange
+) -> dict:
+    try:
+        return {
+            "item": factor_lab_service.change_status(
+                factor_id, version, request.to_status, request.reviewer, request.note
+            )
+        }
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/factor-lab/snapshots")
+async def generate_factor_lab_snapshot(request: FactorLabSnapshotRequest) -> dict:
+    as_of = request.as_of or research_store.market_data_end()
+    if as_of is None:
+        raise HTTPException(status_code=409, detail="本地行情库没有可用截止日")
+    try:
+        return await run_in_threadpool(factor_lab_service.generate_snapshot, as_of)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"实验室因子快照生成失败：{exc}") from exc
+
+
+@app.get("/api/factor-lab/snapshots/latest")
+def latest_factor_lab_snapshot() -> dict:
+    return {"item": factor_lab_service.latest_snapshot()}
+
+
+@app.get("/api/factor-lab/snapshots/{snapshot_id}/values")
+def factor_lab_snapshot_values(
+    snapshot_id: str,
+    factor_id: str,
+    limit: int = Query(100, ge=1, le=500),
+) -> dict:
+    try:
+        return factor_lab_service.snapshot_values(snapshot_id, factor_id, limit)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/factor-lab/evaluations")
+async def run_factor_evaluation(request: FactorEvaluationRequest) -> dict:
+    if factor_evaluation_service is None:
+        raise HTTPException(status_code=409, detail="缺少 stock_data_qfq.db，无法运行正式因子评价")
+    end_date = request.end_date or research_store.market_data_end()
+    if end_date is None:
+        raise HTTPException(status_code=409, detail="没有可用行情截止日")
+    try:
+        return await run_in_threadpool(
+            factor_evaluation_service.run,
+            start_date=request.start_date,
+            end_date=end_date,
+            rebalance_step=request.rebalance_step,
+            horizons=tuple(request.horizons),
+            layer_count=request.layer_count,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"因子评价失败：{exc}") from exc
+
+
+@app.get("/api/factor-lab/evaluations/latest")
+def latest_factor_evaluation() -> dict:
+    return {"item": factor_evaluation_service.latest() if factor_evaluation_service else None}
+
+
+@app.get("/api/factor-lab/evaluations/{evaluation_id}")
+def factor_evaluation(evaluation_id: str) -> dict:
+    if factor_evaluation_service is None:
+        raise HTTPException(status_code=409, detail="缺少 stock_data_qfq.db")
+    item = factor_evaluation_service.evaluation(evaluation_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="因子评价不存在")
+    return item
+
+
+@app.post("/api/factor-lab/backtests")
+async def run_factor_backtest(request: FactorBacktestRequest) -> dict:
+    if factor_backtest_service is None or factor_evaluation_service is None:
+        raise HTTPException(status_code=409, detail="缺少 stock_data_qfq.db，无法运行策略回测")
+    evaluation_id = request.evaluation_id
+    if not evaluation_id:
+        latest = factor_evaluation_service.latest()
+        evaluation_id = latest["run"]["evaluation_id"] if latest else None
+    if not evaluation_id:
+        raise HTTPException(status_code=409, detail="请先完成 M11.2 因子评价")
+    try:
+        return await run_in_threadpool(
+            factor_backtest_service.run,
+            evaluation_id=evaluation_id,
+            factor_id=request.factor_id,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            top_n=request.top_n,
+            rebalance_step=request.rebalance_step,
+            initial_capital=request.initial_capital,
+            commission_rate=request.commission_rate,
+            stamp_duty_rate=request.stamp_duty_rate,
+            slippage_rate=request.slippage_rate,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"策略回测失败：{exc}") from exc
+
+
+@app.get("/api/factor-lab/backtests/latest")
+def latest_factor_backtest() -> dict:
+    return {"item": factor_backtest_service.latest() if factor_backtest_service else None}
+
+
+@app.get("/api/factor-lab/backtests/{backtest_id}")
+def factor_backtest(backtest_id: str) -> dict:
+    if factor_backtest_service is None:
+        raise HTTPException(status_code=409, detail="缺少 stock_data_qfq.db")
+    item = factor_backtest_service.backtest(backtest_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="策略回测不存在")
+    return item
+
+
+@app.post("/api/factor-lab/releases")
+def create_factor_release(request: FactorReleaseCreate) -> dict:
+    try:
+        return factor_release_service.create_candidate(
+            factor_id=request.factor_id,
+            factor_version=request.factor_version,
+            evaluation_id=request.evaluation_id,
+            backtest_id=request.backtest_id,
+            limitations_acknowledged=request.limitations_acknowledged,
+            created_by=request.created_by,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/factor-lab/releases/latest")
+def latest_factor_releases(limit: int = Query(20, ge=1, le=100)) -> dict:
+    return factor_release_service.latest(limit)
+
+
+@app.get("/api/factor-lab/releases/{release_id}")
+def factor_release(release_id: str) -> dict:
+    item = factor_release_service.release(release_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="发布候选不存在")
+    return item
+
+
+@app.post("/api/factor-lab/releases/{release_id}/approve")
+def approve_factor_release(release_id: str, request: FactorReleaseDecision) -> dict:
+    try:
+        return factor_release_service.decide(
+            release_id, "approve", request.reviewer, request.note
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/factor-lab/releases/{release_id}/reject")
+def reject_factor_release(release_id: str, request: FactorReleaseDecision) -> dict:
+    try:
+        return factor_release_service.decide(
+            release_id, "reject", request.reviewer, request.note
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/model-runs/latest")
 def latest_model_run() -> dict:
     return {"item": research_store.latest_model_run()}
@@ -722,7 +1036,12 @@ async def add_research_candidate(request: ResearchCandidateCreate) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.delete("/api/research-candidates/{code}", status_code=204)
+@app.delete(
+    "/api/research-candidates/{code}",
+    status_code=204,
+    response_class=Response,
+    response_model=None,
+)
 def remove_research_candidate(code: str) -> None:
     if not research_store.remove_research_candidate(code):
         raise HTTPException(status_code=404, detail="候选证券不存在")
@@ -806,6 +1125,30 @@ def list_decision_outcomes(
     return {"items": research_store.list_decision_outcomes(status=status, limit=limit)}
 
 
+@app.get("/api/decision-outcomes/maturity-scan")
+def decision_outcome_maturity_scan(as_of: str | None = None) -> dict:
+    target = date.fromisoformat(as_of) if as_of else default_end_date()
+    items = []
+    for case in research_store.list_decision_cases(limit=500):
+        start = date.fromisoformat(case["as_of"])
+        observed = sum(1 for offset in range(1, max((target - start).days, 0) + 1) if (start + timedelta(days=offset)).weekday() < 5)
+        outcome = research_store.decision_case_outcome(case["case_id"])
+        status = "completed" if outcome and outcome["status"] == "completed" else "ready" if observed >= case["decision_horizon_days"] else "pending"
+        items.append({"case_id": case["case_id"], "security_code": case["security_code"], "as_of": case["as_of"], "horizon_trading_days": case["decision_horizon_days"], "estimated_observed_trading_days": observed, "estimated_remaining_trading_days": max(case["decision_horizon_days"] - observed, 0), "status": status, "latest_outcome_id": outcome["outcome_id"] if outcome else None})
+    return {"as_of": target.isoformat(), "items": items, "counts": {name: sum(item["status"] == name for item in items) for name in ("ready", "pending", "completed")}, "boundary": "成熟度按工作日估算；正式评价仍以证券与基准对齐后的真实交易日为准。"}
+
+
+@app.post("/api/decision-outcomes/batch-evaluate")
+def batch_evaluate_decision_outcomes(request: DecisionOutcomeBatchEvaluate) -> dict:
+    results = []
+    for case_id in dict.fromkeys(request.case_ids):
+        try:
+            results.append({"case_id": case_id, "status": "ok", "outcome": evaluate_decision_case(case_id, DecisionOutcomeEvaluate(end_date=request.end_date))})
+        except HTTPException as exc:
+            results.append({"case_id": case_id, "status": "failed", "error": exc.detail, "http_status": exc.status_code})
+    return {"results": results, "completed": sum(item["status"] == "ok" for item in results), "failed": sum(item["status"] == "failed" for item in results)}
+
+
 @app.get("/api/decision-outcomes/{outcome_id}")
 def decision_outcome(outcome_id: str) -> dict:
     item = research_store.decision_outcome(outcome_id)
@@ -857,9 +1200,22 @@ def evaluate_decision_case(case_id: str, request: DecisionOutcomeEvaluate) -> di
 
 @app.post("/api/paper/accounts", status_code=201)
 def create_paper_account(request: PaperAccountCreate) -> dict:
-    return paper_trading_service.create_account(
-        request.name, request.initial_cash, request.benchmark_code
-    )
+    try:
+        return paper_trading_service.create_account(
+            request.name, request.initial_cash, request.benchmark_code, request.strategy_id
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/paper/accounts")
+def list_paper_accounts() -> dict:
+    return {"items": paper_trading_service.list_accounts()}
+
+
+@app.get("/api/paper/strategies")
+def list_paper_strategies() -> dict:
+    return {"items": paper_trading_service.list_strategies()}
 
 
 @app.get("/api/paper/dashboard")
@@ -944,6 +1300,7 @@ def settle_paper_orders(request: PaperSettleRequest) -> dict:
 @app.get("/api/paper/research-targets")
 def paper_research_targets(
     as_of: str | None = None,
+    account_id: str | None = None,
     limit: int = Query(5, ge=1, le=5),
     hold_rank_buffer: int = Query(30, ge=5, le=100),
 ) -> dict:
@@ -952,7 +1309,8 @@ def paper_research_targets(
         raise HTTPException(status_code=409, detail="本地行情库没有可用研究日")
     try:
         return paper_trading_service.research_targets(
-            as_of=target_date, limit=limit, hold_rank_buffer=hold_rank_buffer
+            as_of=target_date, account_id=account_id,
+            limit=limit, hold_rank_buffer=hold_rank_buffer
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -966,6 +1324,7 @@ async def build_paper_research_assessments(request: PaperResearchBatchRequest) -
     try:
         target_set = paper_trading_service.research_targets(
             as_of=target_date,
+            account_id=request.account_id,
             limit=request.limit,
             hold_rank_buffer=request.hold_rank_buffer,
         )
@@ -1533,7 +1892,12 @@ def confirm_claim_evaluation(
     return item
 
 
-@app.delete("/api/theses/{thesis_id}", status_code=204)
+@app.delete(
+    "/api/theses/{thesis_id}",
+    status_code=204,
+    response_class=Response,
+    response_model=None,
+)
 def delete_thesis(thesis_id: str) -> None:
     if not thesis_store.delete(thesis_id):
         raise HTTPException(status_code=404, detail="研究论点不存在")

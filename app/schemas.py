@@ -59,6 +59,61 @@ class FactorSnapshotRequest(BaseModel):
     as_of: str | None = None
 
 
+class FactorDefinitionCreate(BaseModel):
+    factor_id: str = Field(min_length=2, max_length=80, pattern=r"^[a-z0-9_]+$")
+    name: str = Field(min_length=2, max_length=80)
+    description: str = Field(min_length=4, max_length=500)
+    template_id: str = Field(min_length=2, max_length=80)
+    window: int = Field(ge=1, le=500)
+    direction: Literal["positive", "negative"] | None = None
+    owner: str = Field(default="human", min_length=1, max_length=80)
+
+
+class FactorLifecycleChange(BaseModel):
+    to_status: Literal["draft", "testing", "shadow", "approved", "deprecated"]
+    reviewer: str = Field(default="human", min_length=1, max_length=80)
+    note: str = Field(min_length=2, max_length=500)
+
+
+class FactorLabSnapshotRequest(BaseModel):
+    as_of: str | None = None
+
+
+class FactorEvaluationRequest(BaseModel):
+    start_date: str = "2021-01-01"
+    end_date: str | None = None
+    rebalance_step: int = Field(default=20, ge=1, le=120)
+    horizons: list[int] = Field(default_factory=lambda: [1, 5, 20], min_length=1, max_length=8)
+    layer_count: int = Field(default=5, ge=3, le=10)
+
+
+class FactorBacktestRequest(BaseModel):
+    evaluation_id: str | None = None
+    factor_id: str
+    start_date: str | None = None
+    end_date: str | None = None
+    top_n: int = Field(default=30, ge=5, le=100)
+    rebalance_step: int = Field(default=20, ge=5, le=120)
+    initial_capital: float = Field(default=1_000_000, gt=0, le=1_000_000_000)
+    commission_rate: float = Field(default=0.0003, ge=0, le=0.02)
+    stamp_duty_rate: float = Field(default=0.0005, ge=0, le=0.02)
+    slippage_rate: float = Field(default=0.001, ge=0, le=0.02)
+
+
+class FactorReleaseCreate(BaseModel):
+    factor_id: str = Field(min_length=2, max_length=80)
+    factor_version: int = Field(ge=1)
+    evaluation_id: str = Field(min_length=8, max_length=128)
+    backtest_id: str = Field(min_length=8, max_length=128)
+    limitations_acknowledged: bool = False
+    created_by: str = Field(default="human", min_length=1, max_length=80)
+
+
+class FactorReleaseDecision(BaseModel):
+    reviewer: str = Field(default="human", min_length=1, max_length=80)
+    note: str = Field(min_length=2, max_length=1000)
+
+
 class ResearchCandidateCreate(BaseModel):
     code: str
     snapshot_id: str
@@ -85,10 +140,23 @@ class DecisionOutcomeEvaluate(BaseModel):
     end_date: str | None = None
 
 
+class DecisionOutcomeBatchEvaluate(BaseModel):
+    case_ids: list[str] = Field(min_length=1, max_length=100)
+    end_date: str | None = None
+
+
+class FactorNeutralizationRequest(BaseModel):
+    rows: list[dict] = Field(min_length=1, max_length=5000)
+    factor_key: str = Field(min_length=1, max_length=80)
+    industry_key: str = Field(default="industry_l1", min_length=1, max_length=80)
+    market_cap_key: str = Field(default="market_cap", min_length=1, max_length=80)
+
+
 class PaperAccountCreate(BaseModel):
     name: str = Field(default="每日模拟组合", min_length=1, max_length=80)
     initial_cash: float = Field(default=1_000_000, gt=0, le=1_000_000_000)
     benchmark_code: Literal["000300.SH", "000905.SH", "000852.SH"] = "000300.SH"
+    strategy_id: Literal["lightgbm_shadow_v1", "multifactor_linear_v1"] = "lightgbm_shadow_v1"
 
 
 class PaperBenchmarkRefresh(BaseModel):
@@ -101,10 +169,10 @@ class PaperDailyRunCreate(BaseModel):
     account_id: str | None = None
     top_n: int = Field(default=5, ge=1, le=20)
     hold_rank_buffer: int = Field(default=30, ge=5, le=200)
-    target_gross_exposure: float = Field(default=0.50, gt=0, le=1)
-    max_position_weight: float = Field(default=0.12, gt=0, le=0.25)
-    max_industry_weight: float = Field(default=0.20, gt=0, le=0.50)
-    max_pair_correlation: float = Field(default=0.85, ge=0, le=1)
+    target_gross_exposure: float | None = Field(default=None, gt=0, le=1)
+    max_position_weight: float | None = Field(default=None, gt=0, le=0.25)
+    max_industry_weight: float | None = Field(default=None, gt=0, le=0.50)
+    max_pair_correlation: float | None = Field(default=None, ge=0, le=1)
 
 
 class PaperOrderReview(BaseModel):
@@ -145,10 +213,10 @@ class PaperDailyBatchRequest(BaseModel):
     financial_download_limit: int = Field(default=2, ge=0, le=10)
     announcement_download_limit: int = Field(default=3, ge=0, le=10)
     depth: Literal["quick", "deep"] = "quick"
-    target_gross_exposure: float = Field(default=0.50, gt=0, le=1)
-    max_position_weight: float = Field(default=0.12, gt=0, le=0.25)
-    max_industry_weight: float = Field(default=0.20, gt=0, le=0.50)
-    max_pair_correlation: float = Field(default=0.85, ge=0, le=1)
+    target_gross_exposure: float | None = Field(default=None, gt=0, le=1)
+    max_position_weight: float | None = Field(default=None, gt=0, le=0.25)
+    max_industry_weight: float | None = Field(default=None, gt=0, le=0.50)
+    max_pair_correlation: float | None = Field(default=None, ge=0, le=1)
 
 
 class AIClaim(BaseModel):

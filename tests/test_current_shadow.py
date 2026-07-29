@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import app.current_shadow as current_shadow_module
 
 from app.current_shadow import (
     align_forward_adjusted_fields,
@@ -49,7 +50,7 @@ def test_current_signal_rows_rank_single_cross_section():
     ]
 
 
-def test_write_qlib_provider_creates_calendar_instruments_and_binary_features(tmp_path):
+def test_write_qlib_provider_creates_calendar_instruments_and_binary_features(tmp_path, monkeypatch):
     dates = pd.bdate_range("2026-03-02", periods=85)
     records = []
     for code, base in (("600000.SH", 10.0), ("000001.SZ", 20.0)):
@@ -68,10 +69,22 @@ def test_write_qlib_provider_creates_calendar_instruments_and_binary_features(tm
                 }
             )
     target = tmp_path / "provider"
+    original_replace = current_shadow_module.os.replace
+    attempts = 0
+
+    def transient_windows_lock(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("simulated transient scanner lock")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(current_shadow_module.os, "replace", transient_windows_lock)
 
     result = write_qlib_provider(pd.DataFrame(records), target)
 
     assert result == {"reused": False, "calendar_days": 85, "instruments": 2}
+    assert attempts == 3
     assert (target / "calendars" / "day.txt").read_text().splitlines()[-1] == dates[-1].strftime("%Y-%m-%d")
     assert "sh600000" in (target / "instruments" / "csi300.txt").read_text()
     values = np.fromfile(target / "features" / "sh600000" / "close.day.bin", dtype="<f4")

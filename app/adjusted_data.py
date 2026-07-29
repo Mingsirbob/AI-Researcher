@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 import os
 import sqlite3
 import time
@@ -24,9 +25,11 @@ from .resilience import (
 from .updater import (
     ADJUSTMENT_PARAMS,
     DataContractError,
+    QualityIssue,
     StockDataUpdater,
     StockUpdateError,
     UpdateProcessLock,
+    align_adjusted_daily_fields,
     code_to_table,
     table_to_code,
     validate_daily_frame,
@@ -35,6 +38,45 @@ from .updater import (
 
 BUILDER_VERSION = "adjusted-daily-v1"
 ADJUSTED_KINDS = {"backward", "forward"}
+
+
+def partition_confirmed_market_jumps(
+    issues: list[QualityIssue],
+    adjusted: pd.DataFrame,
+    unadjusted: pd.DataFrame | None,
+) -> tuple[list[QualityIssue], list[QualityIssue]]:
+    if unadjusted is None:
+        return issues, []
+
+    def close_returns(frame: pd.DataFrame) -> dict[tuple[str, str], float]:
+        result: dict[tuple[str, str], float] = {}
+        usable = frame.loc[frame["close"].notna(), ["thscode", "time", "close"]].copy()
+        usable["close"] = pd.to_numeric(usable["close"], errors="coerce")
+        for code, group in usable.dropna(subset=["close"]).groupby("thscode"):
+            previous: float | None = None
+            for row in group.sort_values("time").itertuples(index=False):
+                current = float(row.close)
+                if previous is not None and previous > 0:
+                    result[(str(code), str(row.time))] = current / previous - 1
+                previous = current
+        return result
+
+    adjusted_returns = close_returns(adjusted)
+    raw_returns = close_returns(unadjusted)
+    blocking: list[QualityIssue] = []
+    accepted: list[QualityIssue] = []
+    for issue in issues:
+        key = (issue.code, issue.trading_date)
+        adjusted_return = adjusted_returns.get(key)
+        raw_return = raw_returns.get(key)
+        confirmed = (
+            issue.rule == "close_jump"
+            and adjusted_return is not None
+            and raw_return is not None
+            and math.isclose(adjusted_return, raw_return, rel_tol=1e-6, abs_tol=1e-6)
+        )
+        (accepted if confirmed else blocking).append(issue)
+    return blocking, accepted
 
 
 @dataclass(frozen=True)
@@ -48,6 +90,9 @@ class AdjustedBuildPlan:
     security_count: int
     source_min_date: date
     source_max_date: date
+    universe_name: str
+    universe_as_of: str
+    universe_source: str
 
     def as_dict(self) -> dict:
         return {
@@ -62,6 +107,9 @@ class AdjustedBuildPlan:
             "security_count": self.security_count,
             "source_min_date": self.source_min_date.isoformat(),
             "source_max_date": self.source_max_date.isoformat(),
+            "universe_name": self.universe_name,
+            "universe_as_of": self.universe_as_of,
+            "universe_source": self.universe_source,
         }
 
 
@@ -75,6 +123,11 @@ class AdjustedStockDataBuilder:
         fetch: Callable[..., pd.DataFrame],
         *,
         adjustment: str,
+        universe: pd.DataFrame | None = None,
+        universe_name: str = "source_database",
+        universe_as_of: str | None = None,
+        universe_source: str = "stock_data.db tables",
+        raw_fetch: Callable[..., pd.DataFrame] | None = None,
     ):
         if adjustment not in ADJUSTED_KINDS:
             raise ValueError("复权库仅支持 backward 或 forward")
@@ -85,6 +138,31 @@ class AdjustedStockDataBuilder:
         self.fetch = fetch
         self.adjustment = adjustment
         self.fetch_supports_attempt = "attempt" in inspect.signature(fetch).parameters
+        self.raw_fetch = raw_fetch
+        self.raw_fetch_supports_attempt = (
+            "attempt" in inspect.signature(raw_fetch).parameters if raw_fetch else False
+        )
+        self.universe_name = universe_name
+        self.universe_as_of = universe_as_of or datetime.now(
+            ZoneInfo("Asia/Shanghai")
+        ).isoformat()
+        self.universe_source = universe_source
+        self.universe = self._normalize_universe(universe) if universe is not None else None
+
+    @staticmethod
+    def _normalize_universe(universe: pd.DataFrame) -> pd.DataFrame:
+        required = {"security_code", "security_name"}
+        if not isinstance(universe, pd.DataFrame) or not required.issubset(universe.columns):
+            raise ValueError("证券池必须包含 security_code 和 security_name")
+        normalized = universe[["security_code", "security_name"]].copy()
+        normalized["security_code"] = normalized["security_code"].astype(str).str.upper()
+        normalized["security_name"] = normalized["security_name"].astype(str).str.strip()
+        if normalized.empty or normalized["security_code"].duplicated().any():
+            raise ValueError("证券池不能为空且不能包含重复代码")
+        valid = normalized["security_code"].str.fullmatch(r"\d{6}\.(SH|SZ)")
+        if not valid.all():
+            raise ValueError("证券池包含非法 A 股代码")
+        return normalized.sort_values("security_code").reset_index(drop=True)
 
     @staticmethod
     def _source_inventory(source_db: Path) -> tuple[list[str], date, date]:
@@ -105,6 +183,10 @@ class AdjustedStockDataBuilder:
 
     def plan(self, end_date: date, start_date: date | None = None) -> AdjustedBuildPlan:
         tables, source_min, source_max = self._source_inventory(self.source_db)
+        if self.universe is not None:
+            tables = sorted(
+                code_to_table(code) for code in self.universe["security_code"].tolist()
+            )
         effective_start = start_date or source_min
         if effective_start > end_date:
             raise ValueError("start_date 不能晚于 end_date")
@@ -118,6 +200,9 @@ class AdjustedStockDataBuilder:
             security_count=len(tables),
             source_min_date=source_min,
             source_max_date=source_max,
+            universe_name=self.universe_name,
+            universe_as_of=self.universe_as_of,
+            universe_source=self.universe_source,
         )
 
     @staticmethod
@@ -151,7 +236,37 @@ class AdjustedStockDataBuilder:
                 end_date TEXT NOT NULL,
                 security_count INTEGER NOT NULL,
                 row_count INTEGER NOT NULL,
-                built_at TEXT NOT NULL
+                built_at TEXT NOT NULL,
+                blank_rows_dropped INTEGER NOT NULL,
+                accepted_quality_exception_count INTEGER NOT NULL,
+                vwap_adjustment_method TEXT NOT NULL,
+                universe_name TEXT NOT NULL,
+                universe_as_of TEXT NOT NULL,
+                universe_source TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE price_universe_membership (
+                security_code TEXT PRIMARY KEY,
+                security_name TEXT NOT NULL,
+                universe_name TEXT NOT NULL,
+                universe_as_of TEXT NOT NULL,
+                universe_source TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE price_quality_exceptions (
+                exception_id TEXT PRIMARY KEY,
+                security_code TEXT NOT NULL,
+                trading_date TEXT NOT NULL,
+                rule TEXT NOT NULL,
+                observed TEXT NOT NULL,
+                verification TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
             """
         )
@@ -194,6 +309,10 @@ class AdjustedStockDataBuilder:
             raise ValueError("batch_size/max_retries 必须大于 0，retry_delay 不能小于 0")
         plan = self.plan(end_date=end_date, start_date=start_date)
         tables, _, _ = self._source_inventory(self.source_db)
+        if self.universe is not None:
+            tables = [
+                code_to_table(code) for code in self.universe["security_code"].tolist()
+            ]
         codes = [table_to_code(table) for table in tables]
         run_id = str(uuid.uuid4())
         now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -202,12 +321,40 @@ class AdjustedStockDataBuilder:
         self.target_db.parent.mkdir(parents=True, exist_ok=True)
         rows_received = 0
         rows_inserted = 0
+        blank_rows_dropped = 0
+        accepted_quality_exception_count = 0
         failures: dict[str, str] = {}
         quality_failed_codes: set[str] = set()
 
         try:
             with UpdateProcessLock(lock_path), closing(sqlite3.connect(temp_db)) as conn:
                 self._create_schema(conn, tables)
+                if self.universe is None:
+                    membership = [(code, "") for code in codes]
+                else:
+                    membership = list(
+                        self.universe[["security_code", "security_name"]].itertuples(
+                            index=False, name=None
+                        )
+                    )
+                conn.executemany(
+                    """
+                    INSERT INTO price_universe_membership (
+                        security_code, security_name, universe_name, universe_as_of,
+                        universe_source
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            code,
+                            name,
+                            self.universe_name,
+                            self.universe_as_of,
+                            self.universe_source,
+                        )
+                        for code, name in membership
+                    ],
+                )
                 conn.execute(
                     """
                     INSERT INTO data_update_runs (
@@ -224,15 +371,19 @@ class AdjustedStockDataBuilder:
                 )
                 conn.commit()
 
-                def fetch_with_retry(batch: list[str]) -> pd.DataFrame:
+                def fetch_with_retry(
+                    fetcher: Callable[..., pd.DataFrame],
+                    supports_attempt: bool,
+                    batch: list[str],
+                ) -> pd.DataFrame:
                     error: Exception | None = None
                     for attempt in range(1, max_retries + 1):
                         try:
-                            if self.fetch_supports_attempt:
-                                return self.fetch(
+                            if supports_attempt:
+                                return fetcher(
                                     batch, plan.start_date, plan.end_date, attempt=attempt
                                 )
-                            return self.fetch(batch, plan.start_date, plan.end_date)
+                            return fetcher(batch, plan.start_date, plan.end_date)
                         except (DataContractError, CircuitOpenError, CallTimeoutError, CallInProgressError):
                             raise
                         except Exception as exc:
@@ -244,9 +395,18 @@ class AdjustedStockDataBuilder:
                     raise StockUpdateError(str(error))
 
                 def process_batch(batch: list[str]) -> None:
-                    nonlocal rows_received, rows_inserted
+                    nonlocal rows_received, rows_inserted, blank_rows_dropped
+                    nonlocal accepted_quality_exception_count
+                    raw_frame = None
                     try:
-                        frame = fetch_with_retry(batch)
+                        frame = fetch_with_retry(
+                            self.fetch, self.fetch_supports_attempt, batch
+                        )
+                        if self.raw_fetch is not None:
+                            raw_frame = fetch_with_retry(
+                                self.raw_fetch, self.raw_fetch_supports_attempt, batch
+                            )
+                            frame, _ = align_adjusted_daily_fields(frame, raw_frame)
                     except (DataContractError, CircuitOpenError, CallTimeoutError, CallInProgressError):
                         raise
                     except Exception as exc:
@@ -269,7 +429,23 @@ class AdjustedStockDataBuilder:
                         process_batch(batch[midpoint:])
                         return
 
-                    rows_received += len(frame)
+                    batch_rows_received = len(frame)
+                    blank_mask = frame[
+                        ["open", "high", "low", "close", "vwap", "volume"]
+                    ].isna().all(axis=1)
+                    batch_blank_rows = int(blank_mask.sum())
+                    frame = frame.loc[~blank_mask].copy()
+                    missing_observations = set(batch).difference(frame["thscode"])
+                    if missing_observations:
+                        if len(batch) == 1:
+                            failures[batch[0]] = "请求区间内没有有效复权日线观察"
+                            return
+                        midpoint = len(batch) // 2
+                        process_batch(batch[:midpoint])
+                        process_batch(batch[midpoint:])
+                        return
+                    rows_received += batch_rows_received
+                    blank_rows_dropped += batch_blank_rows
                     issues = validate_daily_frame(
                         frame,
                         requested_codes=set(batch),
@@ -277,6 +453,32 @@ class AdjustedStockDataBuilder:
                         end=plan.end_date,
                         previous_closes={code: None for code in batch},
                     )
+                    issues, accepted_issues = partition_confirmed_market_jumps(
+                        issues, frame, raw_frame
+                    )
+                    if accepted_issues:
+                        accepted_quality_exception_count += len(accepted_issues)
+                        created_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+                        conn.executemany(
+                            """
+                            INSERT INTO price_quality_exceptions (
+                                exception_id, security_code, trading_date, rule,
+                                observed, verification, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            [
+                                (
+                                    str(uuid.uuid4()),
+                                    issue.code,
+                                    issue.trading_date,
+                                    issue.rule,
+                                    issue.observed,
+                                    "unadjusted and adjusted close returns match",
+                                    created_at,
+                                )
+                                for issue in accepted_issues
+                            ],
+                        )
                     invalid_codes = {issue.code for issue in issues}
                     if issues:
                         StockDataUpdater._record_quality_issues(conn, run_id, issues)
@@ -313,8 +515,14 @@ class AdjustedStockDataBuilder:
                     stat = self.source_db.stat()
                     conn.execute(
                         """
-                        INSERT INTO price_database_metadata VALUES
-                        (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO price_database_metadata (
+                            metadata_id, builder_version, adjustment, ifind_params,
+                            source_db, source_db_size, source_db_mtime_ns, start_date,
+                            end_date, security_count, row_count, built_at,
+                            blank_rows_dropped, accepted_quality_exception_count,
+                            vwap_adjustment_method, universe_name, universe_as_of,
+                            universe_source
+                        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             BUILDER_VERSION,
@@ -328,6 +536,16 @@ class AdjustedStockDataBuilder:
                             len(codes),
                             rows_inserted,
                             finished_at,
+                            blank_rows_dropped,
+                            accepted_quality_exception_count,
+                            (
+                                "raw_vwap * adjusted_close / raw_close"
+                                if self.raw_fetch is not None
+                                else "vendor_value"
+                            ),
+                            self.universe_name,
+                            self.universe_as_of,
+                            self.universe_source,
                         ),
                     )
                 conn.commit()
@@ -342,6 +560,8 @@ class AdjustedStockDataBuilder:
                 "published": published,
                 "rows_received": rows_received,
                 "rows_inserted": rows_inserted,
+                "blank_rows_dropped": blank_rows_dropped,
+                "accepted_quality_exception_count": accepted_quality_exception_count,
                 "failed_codes": sorted(failures),
                 "failed_reasons": failures,
                 "quality_failed_codes": sorted(quality_failed_codes),

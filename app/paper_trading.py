@@ -8,6 +8,7 @@ from typing import Any
 
 from .data_access import StockRepository, normalize_code
 from .migrations import apply_migration
+from .paper_strategies import DEFAULT_PAPER_STRATEGY_ID, PAPER_STRATEGIES
 from .primitives import canonical_hash
 from .portfolio_decision import (
     COMMISSION_RATE,
@@ -18,7 +19,6 @@ from .portfolio_decision import (
     MIN_COMMISSION,
     SELL_STAMP_DUTY_RATE,
     SLIPPAGE_RATE,
-    STRATEGY_VERSION,
     PortfolioDecisionService,
 )
 from .research_store import ResearchStore, utc_now
@@ -26,10 +26,19 @@ from .research_store import ResearchStore, utc_now
 
 PAPER_BENCHMARKS = {
     "000001.SH": "上证指数",
+    "000300.SH": "沪深300",
     "399001.SZ": "深证成指",
     "399006.SZ": "创业板指",
-    "000300.SH": "沪深300",
+    "000688.SH": "科创50",
+    "000510.CSI": "中证A500",
 }
+
+
+def _normalize_paper_quote_code(value: str) -> str:
+    cleaned = value.strip().upper().replace("_", ".")
+    if len(cleaned) == 10 and cleaned[:6].isdigit() and cleaned[6:] == ".CSI":
+        return cleaned
+    return normalize_code(cleaned)
 
 
 class _PaperExecutionCore:
@@ -42,7 +51,45 @@ class _PaperExecutionCore:
     def _initialize(self) -> None:
         apply_migration(self.store.connect, "0003_paper_trading", self._create_schema)
         apply_migration(self.store.connect, "0007_paper_benchmarks", self._create_benchmark_schema)
+        apply_migration(self.store.connect, "0013_paper_strategies", self._create_strategy_schema)
         self._recover_run_statuses()
+
+    def _create_strategy_schema(self) -> None:
+        with self.store.connect() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS paper_strategy (
+                    strategy_id TEXT PRIMARY KEY,
+                    version TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    signal_source TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            now = utc_now()
+            conn.executemany(
+                """INSERT OR IGNORE INTO paper_strategy
+                   (strategy_id, version, name, description, signal_source,
+                    config_json, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, 'active', ?)""",
+                [
+                    (
+                        item["strategy_id"], item["version"], item["name"],
+                        item["description"], item["signal_source"],
+                        json.dumps(item["config"], ensure_ascii=False, sort_keys=True), now,
+                    )
+                    for item in PAPER_STRATEGIES
+                ],
+            )
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_account)")}
+            if "strategy_id" not in columns:
+                conn.execute("ALTER TABLE paper_account ADD COLUMN strategy_id TEXT")
+            conn.execute(
+                "UPDATE paper_account SET strategy_id=? WHERE strategy_id IS NULL OR strategy_id=''",
+                (DEFAULT_PAPER_STRATEGY_ID,),
+            )
 
     def _create_benchmark_schema(self) -> None:
         with self.store.connect() as conn:
@@ -201,31 +248,65 @@ class _PaperExecutionCore:
             item[key] = json.loads(item.pop(f"{key}_json"))
         return item
 
-    def create_account(self, name: str, initial_cash: float, benchmark_code: str) -> dict:
+    def _strategy(self, strategy_id: str) -> dict:
+        with self.store.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_strategy WHERE strategy_id=? AND status='active'",
+                (strategy_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError("模拟策略不存在或未启用")
+        return self._decode_json(dict(row), "config")
+
+    def list_strategies(self) -> list[dict]:
+        with self.store.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_strategy WHERE status='active' ORDER BY name, strategy_id"
+            ).fetchall()
+        return [self._decode_json(dict(row), "config") for row in rows]
+
+    def _with_strategy(self, account: dict) -> dict:
+        return {**account, "strategy": self._strategy(account["strategy_id"])}
+
+    def create_account(
+        self, name: str, initial_cash: float, benchmark_code: str,
+        strategy_id: str = DEFAULT_PAPER_STRATEGY_ID,
+    ) -> dict:
+        self._strategy(strategy_id)
         now = utc_now()
         account_id = str(uuid.uuid4())
         with self.store.connect() as conn:
             conn.execute(
                 """INSERT INTO paper_account
-                (account_id, name, initial_cash, cash, benchmark_code, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 'active', ?, ?)""",
-                (account_id, name, initial_cash, initial_cash, benchmark_code, now, now),
+                (account_id, name, initial_cash, cash, benchmark_code, status,
+                 created_at, updated_at, strategy_id)
+                VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
+                (account_id, name, initial_cash, initial_cash, benchmark_code, now, now, strategy_id),
             )
         return self.account(account_id)
+
+    def list_accounts(self) -> list[dict]:
+        with self.store.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_account WHERE status='active' ORDER BY created_at, account_id"
+            ).fetchall()
+        return [self._with_strategy(dict(row)) for row in rows]
 
     def default_account(self) -> dict:
         with self.store.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM paper_account WHERE status='active' ORDER BY created_at LIMIT 1"
             ).fetchone()
-        return dict(row) if row else self.create_account("每日模拟组合", 1_000_000, "000300.SH")
+        return self._with_strategy(dict(row)) if row else self.create_account(
+            "每日模拟组合", 1_000_000, "000300.SH", DEFAULT_PAPER_STRATEGY_ID
+        )
 
     def account(self, account_id: str) -> dict:
         with self.store.connect() as conn:
             row = conn.execute("SELECT * FROM paper_account WHERE account_id=?", (account_id,)).fetchone()
         if row is None:
             raise KeyError("模拟账户不存在")
-        return dict(row)
+        return self._with_strategy(dict(row))
 
     def benchmark_sync_range(
         self, account_id: str | None = None, as_of: str | None = None
@@ -263,7 +344,7 @@ class _PaperExecutionCore:
         normalized: list[tuple] = []
         seen: set[tuple[str, str]] = set()
         for row in rows:
-            code = normalize_code(str(row.get("thscode") or ""))
+            code = _normalize_paper_quote_code(str(row.get("thscode") or ""))
             if code not in PAPER_BENCHMARKS:
                 raise ValueError(f"不支持的模拟盘比较基准：{code}")
             trading_date = str(row.get("time") or "")[:10]
@@ -307,12 +388,28 @@ class _PaperExecutionCore:
         account: dict,
         nav_rows: list[dict],
         as_of: str,
+        *,
+        realtime_quotes: dict[str, dict] | None = None,
+        current_nav: float | None = None,
     ) -> dict:
+        realtime_quotes = realtime_quotes or {}
+        live_quotes = {
+            code: item for code, item in realtime_quotes.items()
+            if code in PAPER_BENCHMARKS and item.get("trading_date")
+        }
+        live_date = max(
+            (item["trading_date"] for item in live_quotes.values()), default=None
+        )
+        live_quote_time = max(
+            (item.get("quote_time") for item in live_quotes.values() if item.get("quote_time")),
+            default=None,
+        )
+        comparison_end = max(as_of, live_date) if live_date else as_of
         with self.store.connect() as conn:
             first_fill_row = conn.execute(
                 """SELECT MIN(fill_date) FROM paper_order
                    WHERE account_id=? AND status='filled' AND fill_date<=?""",
-                (account["account_id"], as_of),
+                (account["account_id"], comparison_end),
             ).fetchone()
         inception = first_fill_row[0] if first_fill_row else None
         if inception is None:
@@ -326,7 +423,7 @@ class _PaperExecutionCore:
             }
         eligible_nav = [
             row for row in nav_rows
-            if inception <= row["trading_date"] <= as_of
+            if inception <= row["trading_date"] <= comparison_end
         ]
         if not eligible_nav:
             return {
@@ -347,6 +444,9 @@ class _PaperExecutionCore:
                 "limitations": [f"缺少首笔成交日 {inception} 的组合日终净值，不能后移比较起点。"],
             }
         dates = [row["trading_date"] for row in eligible_nav]
+        if live_date and live_date >= inception and live_date not in dates:
+            dates.append(live_date)
+            dates.sort()
         prior_nav = [row for row in nav_rows if row["trading_date"] < inception]
         baseline_nav = float(prior_nav[-1]["nav"]) if prior_nav else float(account["initial_cash"])
         baseline_nav_date = prior_nav[-1]["trading_date"] if prior_nav else None
@@ -357,6 +457,17 @@ class _PaperExecutionCore:
             }
             for row in eligible_nav
         ]
+        if live_date and live_date >= inception and current_nav is not None:
+            live_portfolio_point = {
+                "date": live_date,
+                "cumulative_return": float(current_nav) / baseline_nav - 1,
+                "valuation_mode": "intraday",
+            }
+            portfolio_points = [
+                item for item in portfolio_points if item["date"] != live_date
+            ]
+            portfolio_points.append(live_portfolio_point)
+            portfolio_points.sort(key=lambda item: item["date"])
         portfolio_latest = portfolio_points[-1]["cumulative_return"]
         with self.store.connect() as conn:
             price_rows = [dict(row) for row in conn.execute(
@@ -364,7 +475,7 @@ class _PaperExecutionCore:
                    FROM paper_benchmark_price
                    WHERE account_id=? AND trading_date<=?
                    ORDER BY benchmark_code, trading_date""",
-                (account["account_id"], as_of),
+                (account["account_id"], comparison_end),
             ).fetchall()]
         by_code: dict[str, dict[str, dict]] = {code: {} for code in PAPER_BENCHMARKS}
         for row in price_rows:
@@ -393,6 +504,23 @@ class _PaperExecutionCore:
                     "date": trading_date,
                     "cumulative_return": float(price["close"]) / float(baseline["close"]) - 1,
                 })
+            live_quote = live_quotes.get(code)
+            if (
+                live_quote
+                and live_date
+                and live_quote["trading_date"] == live_date
+                and live_date >= inception
+                and float(live_quote.get("latest") or 0) > 0
+            ):
+                points = [item for item in points if item["date"] != live_date]
+                points.append({
+                    "date": live_date,
+                    "cumulative_return": (
+                        float(live_quote["latest"]) / float(baseline["close"]) - 1
+                    ),
+                    "valuation_mode": "intraday",
+                })
+                points.sort(key=lambda item: item["date"])
             latest = points[-1]["cumulative_return"] if points else None
             coverage = len(points) / len(dates) if dates else 0.0
             if coverage < 1:
@@ -406,11 +534,18 @@ class _PaperExecutionCore:
                 "coverage": coverage,
                 "points": points,
                 "source": baseline["source"],
+                "latest_source": live_quote.get("source") if live_quote else baseline["source"],
             })
+        live_complete = bool(live_date and current_nav is not None) and all(
+            item["status"] == "complete" and item.get("latest_source") == "iFinD THS_RQ"
+            for item in benchmarks
+        )
         return {
-            "status": "complete" if not missing else "partial",
-            "as_of": eligible_nav[-1]["trading_date"],
+            "status": "live" if live_complete else "complete" if not missing else "partial",
+            "as_of": live_date or eligible_nav[-1]["trading_date"],
             "inception_date": inception,
+            "valuation_mode": "intraday" if live_date and current_nav is not None else "official_close",
+            "latest_quote_time": live_quote_time,
             "portfolio": {
                 "name": account["name"],
                 "latest_return": portfolio_latest,
@@ -419,7 +554,7 @@ class _PaperExecutionCore:
             },
             "benchmarks": benchmarks,
             "limitations": missing + [
-                "收益期从首笔成交日开始：组合使用成交前最近日终净值，指数使用该交易日前最近收盘价；不纳入盘中 THS_RQ 浮动。"
+                "收益期从首笔成交日开始；盘中点使用 iFinD THS_RQ 估算，收盘后由 THS_HD 日线固化正式绩效。"
             ],
         }
 
@@ -485,7 +620,10 @@ class _PaperExecutionCore:
         return None, last_reason
 
     def _realtime_scope(self, account: dict) -> dict[str, list[str]]:
-        scope: dict[str, list[str]] = {account["benchmark_code"]: ["benchmark"]}
+        scope: dict[str, list[str]] = {
+            code: ["benchmark_comparison"] for code in PAPER_BENCHMARKS
+        }
+        scope.setdefault(account["benchmark_code"], []).append("account_benchmark")
         with self.store.connect() as conn:
             positions = conn.execute(
                 "SELECT security_code FROM paper_position WHERE account_id=? AND quantity>0",
@@ -528,7 +666,7 @@ class _PaperExecutionCore:
         if issues:
             return None, issues
         normalized = {
-            "security_code": normalize_code(quote["security_code"]),
+            "security_code": _normalize_paper_quote_code(quote["security_code"]),
             "quote_time": parsed_time.isoformat(sep=" "),
             "trading_date": parsed_time.date().isoformat(),
             **{field: numeric[field] for field in numeric},
@@ -546,7 +684,7 @@ class _PaperExecutionCore:
         saved, invalid = [], []
         returned_codes = set()
         for raw_quote in raw_quotes:
-            code = normalize_code(raw_quote.get("security_code", ""))
+            code = _normalize_paper_quote_code(raw_quote.get("security_code", ""))
             returned_codes.add(code)
             quote, issues = self._validate_realtime_quote(raw_quote)
             if quote is None:
@@ -670,15 +808,17 @@ class _PaperExecutionCore:
                 "drawdown": drawdown, "gross_exposure": market_value / nav if nav else 0,
                 "turnover": turnover, "benchmark_return": None, "excess_return": None}
 
-    def _run_for_date(self, account_id: str, as_of: str) -> dict | None:
+    def _run_for_date(self, account_id: str, as_of: str, strategy_version: str) -> dict | None:
         with self.store.connect() as conn:
             row = conn.execute(
                 "SELECT run_id FROM paper_daily_run WHERE account_id=? AND as_of=? AND strategy_version=?",
-                (account_id, as_of, STRATEGY_VERSION),
+                (account_id, as_of, strategy_version),
             ).fetchone()
         return self.run(row["run_id"]) if row else None
 
-    def _supersede_prior_runs(self, account_id: str, as_of: str, active_run_id: str) -> None:
+    def _supersede_prior_runs(
+        self, account_id: str, as_of: str, active_run_id: str, strategy_version: str
+    ) -> None:
         now = utc_now()
         with self.store.connect() as conn:
             conn.execute(
@@ -688,7 +828,7 @@ class _PaperExecutionCore:
                    WHERE account_id=? AND run_id<>? AND status IN ('proposed','approved')
                      AND fill_date IS NULL
                      AND run_id IN (SELECT run_id FROM paper_daily_run WHERE account_id=? AND as_of=?)""",
-                (f'已由 {STRATEGY_VERSION} 同日批次替代', now, account_id, active_run_id, account_id, as_of),
+                (f'已由 {strategy_version} 同日批次替代', now, account_id, active_run_id, account_id, as_of),
             )
             conn.execute(
                 """UPDATE paper_daily_run SET status='superseded'
@@ -938,7 +1078,13 @@ class _PaperExecutionCore:
         for item in positions:
             item["weight"] = (item["market_value"] or 0) / current_nav if current_nav else 0
         performance_as_of = nav_rows[-1]["trading_date"] if nav_rows else as_of
-        benchmark_comparison = self.benchmark_comparison(account, nav_rows, performance_as_of)
+        benchmark_comparison = self.benchmark_comparison(
+            account,
+            nav_rows,
+            performance_as_of,
+            realtime_quotes=realtime_by_code,
+            current_nav=current_nav,
+        )
         return {"paper_only": True, "account": account, "as_of": as_of, "nav": current_nav,
                 "cumulative_return": current_nav / account["initial_cash"] - 1,
                 "cash_weight": account["cash"] / current_nav if current_nav else 0,
@@ -970,9 +1116,14 @@ class PaperExecutionService(_PaperExecutionCore):
         super().__init__(repository, store, quote_provider)
         self.portfolio_decision = portfolio_decision or PortfolioDecisionService(repository, store)
 
-    def research_targets(self, *, as_of: str, limit: int = 5, hold_rank_buffer: int = 30) -> dict:
+    def research_targets(
+        self, *, as_of: str, account_id: str | None = None,
+        limit: int = 5, hold_rank_buffer: int = 30,
+    ) -> dict:
+        account = self.account(account_id) if account_id else self.default_account()
         return self.portfolio_decision.research_targets(
             as_of=as_of,
+            strategy=account["strategy"],
             limit=limit,
             hold_rank_buffer=hold_rank_buffer,
         )
@@ -985,6 +1136,7 @@ class PaperExecutionService(_PaperExecutionCore):
             account_id=account["account_id"],
             positions=positions,
             as_of=as_of,
+            strategy=account["strategy"],
         )
 
     def create_daily_run(
@@ -994,13 +1146,31 @@ class PaperExecutionService(_PaperExecutionCore):
         account_id: str | None,
         top_n: int,
         hold_rank_buffer: int,
-        target_gross_exposure: float = DEFAULT_TARGET_GROSS_EXPOSURE,
-        max_position_weight: float = DEFAULT_MAX_POSITION_WEIGHT,
-        max_industry_weight: float = DEFAULT_MAX_INDUSTRY_WEIGHT,
-        max_pair_correlation: float = DEFAULT_MAX_PAIR_CORRELATION,
+        target_gross_exposure: float | None = None,
+        max_position_weight: float | None = None,
+        max_industry_weight: float | None = None,
+        max_pair_correlation: float | None = None,
     ) -> dict:
         date.fromisoformat(as_of)
         account = self.account(account_id) if account_id else self.default_account()
+        strategy = account["strategy"]
+        defaults = strategy["config"]
+        target_gross_exposure = float(
+            defaults.get("target_gross_exposure", DEFAULT_TARGET_GROSS_EXPOSURE)
+            if target_gross_exposure is None else target_gross_exposure
+        )
+        max_position_weight = float(
+            defaults.get("max_position_weight", DEFAULT_MAX_POSITION_WEIGHT)
+            if max_position_weight is None else max_position_weight
+        )
+        max_industry_weight = float(
+            defaults.get("max_industry_weight", DEFAULT_MAX_INDUSTRY_WEIGHT)
+            if max_industry_weight is None else max_industry_weight
+        )
+        max_pair_correlation = float(
+            defaults.get("max_pair_correlation", DEFAULT_MAX_PAIR_CORRELATION)
+            if max_pair_correlation is None else max_pair_correlation
+        )
         with self.store.connect() as conn:
             latest_fill = conn.execute(
                 "SELECT MAX(fill_date) FROM paper_order WHERE account_id=? AND status='filled'",
@@ -1011,9 +1181,12 @@ class PaperExecutionService(_PaperExecutionCore):
                 f"研究日 {as_of} 早于账户最近成交日 {latest_fill}，禁止回溯重算当前账户"
             )
         _, shadow = self.portfolio_decision.sources(as_of)
-        existing = self._run_for_date(account["account_id"], as_of)
+        strategy_version = f'{strategy["strategy_id"]}@{strategy["version"]}'
+        existing = self._run_for_date(account["account_id"], as_of, strategy_version)
         if existing:
-            self._supersede_prior_runs(account["account_id"], as_of, existing["run_id"])
+            self._supersede_prior_runs(
+                account["account_id"], as_of, existing["run_id"], strategy_version
+            )
             return {**existing, "reused": True}
 
         positions = self._positions(account["account_id"], as_of, shadow["snapshot_id"])
@@ -1030,6 +1203,7 @@ class PaperExecutionService(_PaperExecutionCore):
             max_position_weight=max_position_weight,
             max_industry_weight=max_industry_weight,
             max_pair_correlation=max_pair_correlation,
+            strategy=strategy,
         )
         with self.store.connect() as conn:
             conn.execute(
@@ -1043,7 +1217,7 @@ class PaperExecutionService(_PaperExecutionCore):
                     as_of,
                     plan["factor_snapshot_id"],
                     plan["shadow_snapshot_id"],
-                    STRATEGY_VERSION,
+                    plan.get("strategy_version", strategy_version),
                     json.dumps(plan["config"], ensure_ascii=False, sort_keys=True),
                     json.dumps(plan["market_summary"], ensure_ascii=False, sort_keys=True),
                     plan["snapshot_hash"],
@@ -1071,7 +1245,7 @@ class PaperExecutionService(_PaperExecutionCore):
                     for order in plan["orders"]
                 ],
             )
-        self._supersede_prior_runs(account["account_id"], as_of, run_id)
+        self._supersede_prior_runs(account["account_id"], as_of, run_id, strategy_version)
         self._refresh_run_status(run_id)
         self._mark_nav(account, as_of)
         return {**self.run(run_id), "reused": False}

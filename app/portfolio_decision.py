@@ -6,6 +6,11 @@ import uuid
 from datetime import date
 
 from .data_access import StockRepository, normalize_code
+from .paper_strategies import (
+    DEFAULT_PAPER_STRATEGY_ID,
+    MULTIFACTOR_LINEAR_STRATEGY_ID,
+    strategy_definition,
+)
 from .primitives import canonical_hash
 from .research_assessment import (
     RESEARCH_ASSESSMENT_POLICY_VERSION,
@@ -40,8 +45,8 @@ class PortfolioDecisionService:
 
     def sources(self, as_of: str) -> tuple[dict, dict]:
         date.fromisoformat(as_of)
-        factor = self.store.latest_factor_snapshot()
-        shadow = self.store.latest_current_shadow()
+        factor = self.store.latest_compatible_factor_snapshot(as_of)
+        shadow = self.store.current_shadow_for_date(as_of)
         if not factor or factor["as_of"] != as_of:
             raise ValueError(f"缺少 {as_of} 的全市场因子快照")
         if not shadow or shadow["as_of"] != as_of or shadow["status"] != "current_shadow_ready":
@@ -62,6 +67,68 @@ class PortfolioDecisionService:
                 [snapshot_id, *codes],
             ).fetchall()
         return {row["security_code"]: dict(row) for row in rows}
+
+    def _multifactor_signals(self, snapshot_id: str, strategy: dict) -> list[dict]:
+        weights = strategy["config"].get("factor_weights") or {}
+        fields = tuple(weights)
+        if not fields:
+            raise ValueError("线性多因子策略没有配置因子权重")
+        with self.store.connect() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    f"""SELECT f.*, COALESCE(m.security_name, f.security_code) security_name
+                        FROM security_factor_snapshot f
+                        LEFT JOIN security_master m ON m.security_code=f.security_code
+                        WHERE f.snapshot_id=? AND f.quality_status='passed'""",
+                    (snapshot_id,),
+                ).fetchall()
+            ]
+        eligible = [
+            row for row in rows
+            if all(
+                row.get(field) is not None and math.isfinite(float(row[field]))
+                for field in fields
+            )
+        ]
+        if not eligible:
+            return []
+        percentiles: dict[str, dict[str, float]] = {}
+        for field in fields:
+            ordered = sorted(eligible, key=lambda row: (float(row[field]), row["security_code"]))
+            denominator = max(1, len(ordered) - 1)
+            percentiles[field] = {
+                row["security_code"]: index / denominator
+                for index, row in enumerate(ordered)
+            }
+        scored = []
+        for row in eligible:
+            code = row["security_code"]
+            score = sum(float(weight) * percentiles[field][code] for field, weight in weights.items())
+            scored.append({
+                "security_code": code,
+                "security_name": row["security_name"],
+                "source_instrument": None,
+                "score": score,
+                "factor_contributions": {
+                    field: float(weight) * percentiles[field][code]
+                    for field, weight in weights.items()
+                },
+            })
+        scored.sort(key=lambda item: (-item["score"], item["security_code"]))
+        size = len(scored)
+        for index, item in enumerate(scored, start=1):
+            item["cross_section_rank"] = index
+            item["cross_section_size"] = size
+            item["percentile"] = 1.0 if size == 1 else 1 - (index - 1) / (size - 1)
+        return scored
+
+    def strategy_signals(self, factor: dict, shadow: dict, strategy: dict) -> list[dict]:
+        if strategy["strategy_id"] == MULTIFACTOR_LINEAR_STRATEGY_ID:
+            return self._multifactor_signals(factor["snapshot_id"], strategy)
+        return self.store.list_current_shadow_signals(
+            shadow["snapshot_id"], limit=min(500, int(shadow["signal_count"]))
+        )["items"]
 
     def _tradability(self, code: str, as_of: str) -> dict:
         try:
@@ -254,17 +321,18 @@ class PortfolioDecisionService:
             })
         return evaluations
 
-    def research_targets(self, *, as_of: str, limit: int = 5, hold_rank_buffer: int = 30) -> dict:
+    def research_targets(
+        self, *, as_of: str, strategy: dict, limit: int = 5, hold_rank_buffer: int = 30
+    ) -> dict:
         factor, shadow = self.sources(as_of)
-        signals = self.store.list_current_shadow_signals(
-            shadow["snapshot_id"], limit=hold_rank_buffer
-        )["items"]
+        signals = self.strategy_signals(factor, shadow, strategy)[:hold_rank_buffer]
         evaluations = self.evaluate_candidates(signals, factor["snapshot_id"], as_of)
         targets = [item for item in evaluations if item["risk_status"] == "passed"][:limit]
         return {
             "as_of": as_of,
             "factor_snapshot_id": factor["snapshot_id"],
             "shadow_snapshot_id": shadow["snapshot_id"],
+            "strategy": strategy,
             "targets": [
                 {
                     "security_code": item["security_code"],
@@ -278,13 +346,20 @@ class PortfolioDecisionService:
             ],
         }
 
-    def review_holdings(self, *, account_id: str, positions: list[dict], as_of: str) -> dict:
+    def review_holdings(
+        self, *, account_id: str, positions: list[dict], as_of: str, strategy: dict | None = None
+    ) -> dict:
+        strategy = strategy or strategy_definition(DEFAULT_PAPER_STRATEGY_ID)
         factor, shadow = self.sources(as_of)
+        strategy_signal_by_code = {
+            item["security_code"]: item
+            for item in self.strategy_signals(factor, shadow, strategy)
+        }
         signals = []
         shadow_covered: dict[str, bool] = {}
         for position in positions:
             code = position["security_code"]
-            signal = self.store.current_shadow_signal(shadow["snapshot_id"], code)
+            signal = strategy_signal_by_code.get(code)
             shadow_covered[code] = signal is not None
             signals.append(signal or {
                 "security_code": code,
@@ -324,6 +399,7 @@ class PortfolioDecisionService:
             "as_of": as_of,
             "factor_snapshot_id": factor["snapshot_id"],
             "shadow_snapshot_id": shadow["snapshot_id"],
+            "strategy": strategy,
             "position_count": len(items),
             "counts": counts,
             "items": items,
@@ -343,17 +419,19 @@ class PortfolioDecisionService:
         max_position_weight: float,
         max_industry_weight: float,
         max_pair_correlation: float,
+        strategy: dict | None = None,
     ) -> dict:
+        strategy = strategy or strategy_definition(DEFAULT_PAPER_STRATEGY_ID)
         factor, shadow = self.sources(as_of)
         position_by_code = {item["security_code"]: item for item in positions}
-        signals = self.store.list_current_shadow_signals(
-            shadow["snapshot_id"], limit=hold_rank_buffer
-        )["items"]
+        all_signals = self.strategy_signals(factor, shadow, strategy)
+        signals = all_signals[:hold_rank_buffer]
         signal_by_code = {item["security_code"]: item for item in signals}
+        all_signal_by_code = {item["security_code"]: item for item in all_signals}
         holding_shadow_covered = {}
         for position in positions:
             code = position["security_code"]
-            signal = self.store.current_shadow_signal(shadow["snapshot_id"], code)
+            signal = all_signal_by_code.get(code)
             holding_shadow_covered[code] = signal is not None
             signal_by_code.setdefault(code, signal or {
                 "security_code": code,
@@ -390,6 +468,9 @@ class PortfolioDecisionService:
             "execution": "first_available_open_after_as_of",
             "lot_size": 100,
             "research_assessment_policy": RESEARCH_ASSESSMENT_POLICY_VERSION,
+            "strategy_id": strategy["strategy_id"],
+            "strategy_version": strategy["version"],
+            "signal_source": strategy["signal_source"],
         }
         selected: list[dict] = []
         industry_counts: dict[str, int] = {}
@@ -500,7 +581,8 @@ class PortfolioDecisionService:
             "as_of": as_of,
             "factor_snapshot_id": factor["snapshot_id"],
             "shadow_snapshot_id": shadow["snapshot_id"],
-            "strategy_version": STRATEGY_VERSION,
+            "strategy_version": f'{strategy["strategy_id"]}@{strategy["version"]}',
+            "strategy_id": strategy["strategy_id"],
             "config": config,
             "market_summary": market_summary,
         }
@@ -589,6 +671,8 @@ class PortfolioDecisionService:
         return {
             "factor_snapshot_id": factor["snapshot_id"],
             "shadow_snapshot_id": shadow["snapshot_id"],
+            "strategy_id": strategy["strategy_id"],
+            "strategy_version": snapshot["strategy_version"],
             "config": config,
             "market_summary": market_summary,
             "snapshot_hash": canonical_hash(snapshot, compact=False),

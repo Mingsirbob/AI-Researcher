@@ -5,6 +5,7 @@ import math
 import os
 import pickle
 import shutil
+import time
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ import pandas as pd
 from .model_registry import qlib_instrument_to_code, sha256_file
 from .primitives import canonical_hash, code_to_qlib_instrument, sha256_parts, sha256_text
 from .research_store import ResearchStore
-from .updater import DAILY_COLUMNS
+from .updater import DAILY_COLUMNS, align_adjusted_daily_fields
 
 
 CURRENT_SHADOW_VERSION = "current-shadow-v1"
@@ -39,7 +40,9 @@ def _gate(name: str, passed: bool, observed, expected: str) -> dict:
 def _daily_rank_ic(group: pd.DataFrame) -> float:
     if len(group) < 20 or group["score"].nunique() < 2 or group["label"].nunique() < 2:
         return math.nan
-    return float(group["score"].corr(group["label"], method="spearman"))
+    # Spearman is Pearson correlation over average ranks. Computing it directly
+    # avoids Pandas' optional SciPy import and keeps this core gate deterministic.
+    return float(group["score"].rank(method="average").corr(group["label"].rank(method="average")))
 
 
 def _daily_top_bottom_spread(group: pd.DataFrame) -> float:
@@ -212,30 +215,7 @@ def align_forward_adjusted_fields(
     adjusted: pd.DataFrame,
     unadjusted: pd.DataFrame,
 ) -> tuple[pd.DataFrame, dict]:
-    keys = ["time", "thscode"]
-    raw = unadjusted[keys + ["close", "vwap", "volume"]].rename(
-        columns={"close": "raw_close", "vwap": "raw_vwap", "volume": "raw_volume"}
-    )
-    merged = adjusted.merge(raw, on=keys, how="left", validate="one_to_one")
-    ratio = pd.to_numeric(merged["close"], errors="coerce") / pd.to_numeric(
-        merged["raw_close"], errors="coerce"
-    )
-    scaled_vwap = pd.to_numeric(merged["raw_vwap"], errors="coerce") * ratio
-    original_vwap = pd.to_numeric(merged["vwap"], errors="coerce")
-    merged["vwap"] = scaled_vwap.where(scaled_vwap.notna(), original_vwap)
-    merged["volume"] = pd.to_numeric(merged["volume"], errors="coerce").where(
-        pd.to_numeric(merged["volume"], errors="coerce").notna(),
-        pd.to_numeric(merged["raw_volume"], errors="coerce"),
-    )
-    eligible = pd.to_numeric(merged["close"], errors="coerce").notna()
-    scaled = eligible & scaled_vwap.notna()
-    summary = {
-        "method": "raw_vwap * adjusted_close / raw_close",
-        "eligible_rows": int(eligible.sum()),
-        "scaled_rows": int(scaled.sum()),
-        "scaled_coverage": float(scaled.sum() / eligible.sum()) if eligible.any() else 0.0,
-    }
-    return merged[list(DAILY_COLUMNS)].copy(), summary
+    return align_adjusted_daily_fields(adjusted, unadjusted)
 
 
 def data_fingerprint(frame: pd.DataFrame, universe: pd.DataFrame, as_of: date) -> str:
@@ -246,6 +226,23 @@ def data_fingerprint(frame: pd.DataFrame, universe: pd.DataFrame, as_of: date) -
         json.dumps(universe_codes, separators=(",", ":")).encode("ascii"),
         f"CPS:2:{as_of.isoformat()}:{CURRENT_SHADOW_VERSION}".encode("ascii"),
     ])
+
+
+def _publish_provider_directory(temp: Path, target: Path, attempts: int = 10) -> bool:
+    """Publish a provider atomically, tolerating transient Windows file locks."""
+    for attempt in range(attempts):
+        if target.exists():
+            return False
+        try:
+            os.replace(temp, target)
+            return True
+        except PermissionError:
+            if target.exists():
+                return False
+            if attempt == attempts - 1:
+                raise
+            time.sleep(min(0.1 * (attempt + 1), 0.5))
+    return False
 
 
 def write_qlib_provider(frame: pd.DataFrame, target: Path) -> dict:
@@ -291,8 +288,8 @@ def write_qlib_provider(frame: pd.DataFrame, target: Path) -> dict:
             shutil.rmtree(temp)
             return {"reused": True, "calendar_days": len(calendars), "instruments": len(instruments)}
         target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(temp, target)
-        return {"reused": False, "calendar_days": len(calendars), "instruments": len(instruments)}
+        published = _publish_provider_directory(temp, target)
+        return {"reused": not published, "calendar_days": len(calendars), "instruments": len(instruments)}
     finally:
         if temp.exists():
             shutil.rmtree(temp)

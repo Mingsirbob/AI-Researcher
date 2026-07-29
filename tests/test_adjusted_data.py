@@ -3,8 +3,8 @@ from datetime import date
 
 import pandas as pd
 
-from app.adjusted_data import AdjustedStockDataBuilder
-from app.updater import normalize_daily_frame
+from app.adjusted_data import AdjustedStockDataBuilder, partition_confirmed_market_jumps
+from app.updater import QualityIssue, normalize_daily_frame
 
 
 def create_source_db(path):
@@ -132,3 +132,65 @@ def test_partial_build_does_not_replace_existing_adjusted_database(tmp_path):
     assert result["published"] is False
     with sqlite3.connect(target) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone()[0] == "keep"
+
+
+def test_builder_can_freeze_an_explicit_universe(tmp_path):
+    source = tmp_path / "stock_data.db"
+    target = tmp_path / "stock_data_qfq.db"
+    create_source_db(source)
+    universe = pd.DataFrame(
+        [{"security_code": "000002.SZ", "security_name": "万科A"}]
+    )
+
+    result = AdjustedStockDataBuilder(
+        source,
+        target,
+        lambda codes, start, end: adjusted_rows(codes),
+        adjustment="forward",
+        universe=universe,
+        universe_name="csi300_current",
+        universe_as_of="2026-07-26",
+        universe_source="iFinD THS_WCQuery",
+    ).build(
+        start_date=date(2020, 1, 2),
+        end_date=date(2020, 1, 3),
+        retry_delay=0,
+    )
+
+    assert result["security_count"] == 1
+    with sqlite3.connect(target) as conn:
+        stock_tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stock_%'"
+        ).fetchall()
+        membership = conn.execute(
+            "SELECT security_code, security_name, universe_name, universe_as_of "
+            "FROM price_universe_membership"
+        ).fetchone()
+    assert stock_tables == [("stock_000002_SZ",)]
+    assert membership == ("000002.SZ", "万科A", "csi300_current", "2026-07-26")
+
+
+def test_matching_raw_and_adjusted_market_jump_is_an_audited_exception():
+    frame = normalize_daily_frame(
+        pd.DataFrame(
+            [
+                {"time": "2021-08-09", "thscode": "000792.SZ", "open": 8.0,
+                 "high": 9.0, "low": 8.0, "close": 8.84, "vwap": 8.5, "volume": 1.0},
+                {"time": "2021-08-10", "thscode": "000792.SZ", "open": 35.0,
+                 "high": 43.0, "low": 32.0, "close": 35.9, "vwap": 36.0, "volume": 1.0},
+            ]
+        )
+    )
+    issue = QualityIssue(
+        code="000792.SZ",
+        trading_date="2021-08-10",
+        rule="close_jump",
+        field="close",
+        observed="return=3.061086",
+        expected="absolute close-to-close return <= 60%",
+    )
+
+    blocking, accepted = partition_confirmed_market_jumps([issue], frame, frame)
+
+    assert blocking == []
+    assert accepted == [issue]

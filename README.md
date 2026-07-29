@@ -18,6 +18,10 @@
 
 `paper-evidence-risk-v3.2` 将全部持仓与 Shadow 候选统一评价：维持和冻结仓位继续占用组合席位，降权只允许减仓，只有否决或量化硬风险失败才提出退出。订单成交严格先卖后买；若卖单未释放席位，新建仓买单会被阻止，确保“最多持有 N 只”约束落实到实际持仓。
 
+量化实验室已推进到 M11.2。9 个口径有效的价量因子已从不复权 v1 升级为 `CPS:2 / CSI300 current` 的不可变 v2，并建立未来 1/5/20 日 Rank IC、年化 ICIR、五分层收益、Top 层换手和跨因子相关性评价。首个正式基线覆盖 2021-01-04 至 2026-06-18 的 67 个调仓截面，结果按数据、因子与参数指纹冻结。前复权 VWAP 不能与真实成交量直接相乘还原历史成交额，因此平均成交额因子仅保留不复权 v1 历史定义，不进入前复权评价。现有 LightGBM 仍绑定 `alpha158_set@v1`；评价结果不会自动进入模型、候选池或交易。当前股票池是查询时点的沪深300，历史评价存在幸存者偏差。
+
+M11.3 已建立单因子 Top-N 策略回测。回测绑定 M11.2 的评价 ID、因子版本和行情指纹，信号在收盘后形成并于下一交易日开盘成交，逐日记录现金、持仓、净值、回撤、调仓和交易成本。首个 `volume_ratio_20d@v2` 基线采用 Top 30、20日调仓；结果只用于研究，基准是当前沪深300等权代理，仍存在幸存者偏差且尚未完整模拟历史涨跌停、整手和冲击成本。
+
 ## 运行
 
 ```powershell
@@ -27,6 +31,11 @@ python run.py
 ```
 
 默认打开 `http://127.0.0.1:8000`；也可通过环境变量或启动参数使用其他端口。
+
+Vue 3 是唯一生产前端。运行 `npm ci && npm run build` 后，访问
+`http://127.0.0.1:8000` 会重定向到 `/next/paper`。若构建产物缺失，根入口返回
+503；生产回滚通过恢复上一完整 Git/部署版本完成。迁移范围、开发方式和退役记录见
+`docs/VUE3_MIGRATION.md`。
 
 ### iFinD 配置
 
@@ -181,6 +190,11 @@ pytest -q
 - `GET /api/model-runs/{model_run_id}/validation`
 - `GET /api/current-shadow/latest`
 - `GET /api/current-shadow/{snapshot_id}/signals`
+- `POST /api/factor-lab/releases`
+- `GET /api/factor-lab/releases/latest`
+- `GET /api/factor-lab/releases/{release_id}`
+- `POST /api/factor-lab/releases/{release_id}/approve`
+- `POST /api/factor-lab/releases/{release_id}/reject`
 - `POST /api/paper/daily-batches`
 - `GET /api/paper/daily-batches/latest`
 - `GET /api/paper/daily-batches/{batch_id}`
