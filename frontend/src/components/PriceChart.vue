@@ -1,6 +1,106 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-const props=defineProps<{dates:string[];close:number[];volume?:number[]}>();const canvas=ref<HTMLCanvasElement>();let observer:ResizeObserver|undefined;
-function draw(){const el=canvas.value;if(!el||!props.close?.length)return;const rect=el.getBoundingClientRect(),dpr=devicePixelRatio||1;el.width=Math.round(rect.width*dpr);el.height=Math.round(rect.height*dpr);const ctx=el.getContext("2d");if(!ctx)return;ctx.scale(dpr,dpr);const n=props.close.length,start=Math.max(0,n-250),values=props.close.slice(start).map(Number),dates=props.dates.slice(start),volumes=(props.volume||[]).slice(start).map(Number),w=rect.width,h=rect.height,p={l:12,r:55,t:16,b:26},vh=52,bottom=h-p.b-vh,min=Math.min(...values),max=Math.max(...values),range=max-min||1,x=(i:number)=>p.l+i/Math.max(1,values.length-1)*(w-p.l-p.r),y=(v:number)=>p.t+(max+range*.08-v)/(range*1.16)*(bottom-p.t);ctx.clearRect(0,0,w,h);ctx.font="9px sans-serif";for(let i=0;i<5;i++){const yy=p.t+i/4*(bottom-p.t);ctx.strokeStyle="#e3e8e3";ctx.beginPath();ctx.moveTo(p.l,yy);ctx.lineTo(w-p.r,yy);ctx.stroke();ctx.fillStyle="#717a74";ctx.fillText((max+range*.08-i/4*range*1.16).toFixed(2),w-p.r+7,yy+3);}const mv=Math.max(...volumes,1);volumes.forEach((v,i)=>{const bh=v/mv*(vh-10);ctx.fillStyle=i&&values[i]>=values[i-1]?"#a23c3445":"#18704f45";ctx.fillRect(x(i)-1.5,h-p.b-bh,3,bh);});ctx.strokeStyle="#007b70";ctx.lineWidth=2;ctx.beginPath();values.forEach((v,i)=>i?ctx.lineTo(x(i),y(v)):ctx.moveTo(x(i),y(v)));ctx.stroke();ctx.fillStyle="#717a74";for(let i=0;i<5;i++){const idx=Math.round(i/4*(dates.length-1));ctx.fillText(dates[idx]?.slice(2)||"",x(idx)-16,h-7);}}
-onMounted(()=>{observer=new ResizeObserver(draw);if(canvas.value)observer.observe(canvas.value);draw();});onBeforeUnmount(()=>observer?.disconnect());watch(()=>[props.dates,props.close],draw,{deep:true});
-</script><template><canvas ref="canvas" class="price-chart" aria-label="价格与成交量图"></canvas></template><style scoped>.price-chart{width:100%;height:300px;display:block;background:#fff}</style>
+import {
+  CandlestickSeries,
+  ColorType,
+  HistogramSeries,
+  createSeriesMarkers,
+  createChart,
+  type IChartApi,
+  type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type SeriesMarker,
+  type Time,
+} from "lightweight-charts";
+
+interface Marker { date: string; side: "buy" | "sell"; label?: string }
+const props = withDefaults(defineProps<{
+  dates: string[];
+  close: number[];
+  open?: number[];
+  high?: number[];
+  low?: number[];
+  volume?: number[];
+  markers?: Marker[];
+}>(), { open: () => [], high: () => [], low: () => [], volume: () => [], markers: () => [] });
+
+const container = ref<HTMLElement>();
+let chart: IChartApi | undefined;
+let candles: ISeriesApi<"Candlestick"> | undefined;
+let volumes: ISeriesApi<"Histogram"> | undefined;
+let markerPlugin: ISeriesMarkersPluginApi<Time> | undefined;
+let observer: ResizeObserver | undefined;
+
+function finite(value: unknown, fallback: number) {
+  const result = Number(value);
+  return Number.isFinite(result) ? result : fallback;
+}
+
+function setData() {
+  if (!candles || !volumes) return;
+  const points = props.dates.map((date, index) => {
+    const close = finite(props.close[index], 0);
+    const previous = finite(props.close[index - 1], close);
+    const open = finite(props.open[index], previous);
+    const high = Math.max(open, close, finite(props.high[index], Math.max(open, close)));
+    const low = Math.min(open, close, finite(props.low[index], Math.min(open, close)));
+    return { time: date as Time, open, high, low, close };
+  }).filter((item) => item.close > 0);
+  candles.setData(points);
+  volumes.setData(props.dates.map((date, index) => {
+    const current = finite(props.close[index], 0);
+    const previous = finite(props.close[index - 1], current);
+    return {
+      time: date as Time,
+      value: Math.max(0, finite(props.volume[index], 0)),
+      color: current >= previous ? "rgba(162,60,52,.35)" : "rgba(24,112,79,.35)",
+    };
+  }));
+  markerPlugin?.setMarkers(props.markers.map((item) => ({
+    time: item.date as Time,
+    position: item.side === "buy" ? "belowBar" : "aboveBar",
+    color: item.side === "buy" ? "#a23c34" : "#18704f",
+    shape: item.side === "buy" ? "arrowUp" : "arrowDown",
+    text: item.label || (item.side === "buy" ? "买入" : "卖出"),
+  } satisfies SeriesMarker<Time>)));
+  chart?.timeScale().fitContent();
+}
+
+onMounted(() => {
+  if (!container.value) return;
+  chart = createChart(container.value, {
+    width: container.value.clientWidth,
+    height: 330,
+    layout: { background: { type: ColorType.Solid, color: "#ffffff" }, textColor: "#69716c", fontFamily: '"Microsoft YaHei UI", sans-serif', fontSize: 10 },
+    grid: { vertLines: { color: "#edf0eb" }, horzLines: { color: "#edf0eb" } },
+    rightPriceScale: { borderColor: "#d9ded9", scaleMargins: { top: 0.08, bottom: 0.25 } },
+    timeScale: { borderColor: "#d9ded9", timeVisible: true, rightOffset: 4 },
+    crosshair: { vertLine: { color: "#006b5e", labelBackgroundColor: "#006b5e" }, horzLine: { color: "#006b5e", labelBackgroundColor: "#006b5e" } },
+    handleScroll: true,
+    handleScale: true,
+  });
+  candles = chart.addSeries(CandlestickSeries, { upColor: "#a23c34", downColor: "#18704f", borderVisible: false, wickUpColor: "#a23c34", wickDownColor: "#18704f" });
+  markerPlugin = createSeriesMarkers(candles);
+  volumes = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "volume" });
+  chart.priceScale("volume").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+  setData();
+  observer = new ResizeObserver(([entry]) => chart?.applyOptions({ width: Math.floor(entry.contentRect.width) }));
+  observer.observe(container.value);
+});
+
+watch(() => [props.dates, props.close, props.open, props.high, props.low, props.volume, props.markers], setData, { deep: true });
+onBeforeUnmount(() => { observer?.disconnect(); chart?.remove(); chart = undefined; });
+</script>
+
+<template>
+  <div class="financial-chart" role="img" aria-label="证券K线与成交量图">
+    <div ref="container" />
+    <p v-if="!dates.length" class="muted">暂无可绘制行情数据</p>
+  </div>
+</template>
+
+<style scoped>
+.financial-chart { position: relative; width: 100%; min-height: 330px; background: white; }
+.financial-chart > div { width: 100%; min-height: 330px; }
+.financial-chart > p { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; background: white; }
+</style>

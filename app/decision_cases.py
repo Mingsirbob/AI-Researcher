@@ -52,8 +52,14 @@ def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
 
 
 class DecisionCaseService:
-    def __init__(self, research_store: ResearchStore, thesis_store: ThesisStore):
+    def __init__(
+        self,
+        research_store: ResearchStore,
+        thesis_store: ThesisStore,
+        quant_store: ResearchStore | None = None,
+    ):
         self.research_store = research_store
+        self.quant_store = quant_store or research_store
         self.thesis_store = thesis_store
 
     @staticmethod
@@ -105,9 +111,9 @@ class DecisionCaseService:
 
     def _select_shadow(self, code: str, as_of: str, snapshot_id: str | None) -> tuple[dict | None, dict | None]:
         snapshot = (
-            self.research_store.current_shadow_snapshot(snapshot_id)
+            self.quant_store.current_shadow_snapshot(snapshot_id)
             if snapshot_id
-            else self.research_store.latest_current_shadow()
+            else self.quant_store.latest_current_shadow()
         )
         if snapshot is None:
             return None, None
@@ -115,7 +121,7 @@ class DecisionCaseService:
             if snapshot_id:
                 raise ValueError("当前 Shadow 快照晚于决策截止日，拒绝未来数据")
             return None, None
-        signal = self.research_store.current_shadow_signal(snapshot["snapshot_id"], code)
+        signal = self.quant_store.current_shadow_signal(snapshot["snapshot_id"], code)
         return snapshot, signal
 
     @staticmethod
@@ -249,7 +255,7 @@ class DecisionCaseService:
         thesis = self._select_thesis(normalized, thesis_id)
         shadow, signal = self._select_shadow(normalized, as_of, shadow_snapshot_id)
         validation = (
-            self.research_store.model_validation(shadow["validation_id"])
+            self.quant_store.model_validation(shadow["validation_id"])
             if shadow else None
         )
 

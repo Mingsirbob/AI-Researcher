@@ -46,9 +46,11 @@ class CompanyResearchService:
         repository: StockRepository,
         store: ResearchStore,
         settings: Settings,
+        quant_store: ResearchStore | None = None,
     ) -> None:
         self.repository = repository
         self.store = store
+        self.quant_store = quant_store or store
         self.settings = settings
 
     def _build_analysis(self, code: str, as_of: str | None) -> dict:
@@ -116,7 +118,7 @@ class CompanyResearchService:
     ) -> dict:
         analysis = self._build_analysis(code, as_of)
         try:
-            quant_context = self.store.quant_context_for_security(
+            quant_context = self.quant_store.quant_context_for_security(
                 analysis["security"]["code"],
                 as_of=analysis["as_of"],
                 snapshot_id=factor_snapshot_id,

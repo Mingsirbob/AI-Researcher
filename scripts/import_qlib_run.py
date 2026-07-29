@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from app.config import settings
 from app.model_registry import QlibMLflowImporter
 from app.research_store import ResearchStore
+from app.quant_store import QuantStore
 
 
 def main() -> int:
@@ -25,7 +26,8 @@ def main() -> int:
         help="确认 params.pkl/pred.pkl/label.pkl 来源可信并允许反序列化",
     )
     args = parser.parse_args()
-    store = ResearchStore(settings.state_db, settings.document_root)
+    research_store = ResearchStore(settings.state_db, settings.document_root)
+    store = QuantStore(settings.quant_db, research_store)
     result = QlibMLflowImporter(store, settings.model_artifact_root).import_run(
         args.experiment_dir, args.run_id, trust_pickle=args.trust_pickle
     )

@@ -15,6 +15,7 @@ from app.data_access import StockRepository
 from app.factor_evaluation import DEFAULT_HORIZONS, FactorEvaluationService
 from app.factor_lab import FactorLabService
 from app.research_store import ResearchStore
+from app.quant_store import QuantStore
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,7 +31,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     repository = StockRepository(settings.stock_qfq_db)
-    store = ResearchStore(settings.state_db, settings.document_root)
+    research_store = ResearchStore(settings.state_db, settings.document_root)
+    store = QuantStore(settings.quant_db, research_store)
     factor_lab = FactorLabService(
         store,
         repository,

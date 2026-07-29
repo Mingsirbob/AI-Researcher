@@ -10,6 +10,7 @@ from .primitives import canonical_hash, canonical_json
 from .migrations import apply_migration
 from .research_store import ResearchStore, utc_now
 from .runtime_events import RunContext, RuntimeEventStore, bind_run_context
+from .sqlite_store import migrate_legacy_tables
 
 
 DAILY_BATCH_VERSION = "daily-research-batch-v1.3"
@@ -21,17 +22,32 @@ DAILY_BATCH_STEPS = (
     "holdings_review",
     "order_proposals",
 )
+PAPER_DAILY_BATCH_TABLES = ("paper_daily_batch", "paper_daily_batch_step")
 
 
 class DailyBatchStore:
-    def __init__(self, store: ResearchStore):
+    def __init__(
+        self,
+        store: Any,
+        *,
+        event_store: RuntimeEventStore | None = None,
+        legacy_store: ResearchStore | None = None,
+    ):
         self.store = store
-        self.events = RuntimeEventStore(store)
+        self.events = event_store or RuntimeEventStore(store)
+        self.legacy_store = legacy_store
         self._initialize()
         self._recover_interrupted()
 
     def _initialize(self) -> None:
         apply_migration(self.store.connect, "0004_daily_batch", self._create_schema)
+        if self.legacy_store is not None:
+            migrate_legacy_tables(
+                target=self.store,
+                source=self.legacy_store,
+                migration_id="0015_split_paper_daily_batch_database",
+                tables=PAPER_DAILY_BATCH_TABLES,
+            )
 
     def _create_schema(self) -> None:
         with self.store.connect() as conn:

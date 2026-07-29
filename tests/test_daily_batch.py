@@ -2,6 +2,8 @@ import asyncio
 
 from app.daily_batch import DAILY_BATCH_STEPS, DailyBatchRunner, DailyBatchStore
 from app.research_store import ResearchStore
+from app.runtime_events import RuntimeEventStore
+from app.sqlite_store import SQLiteStore
 
 
 def batch_store(tmp_path):
@@ -110,3 +112,46 @@ def test_daily_batch_recovers_running_task_after_restart(tmp_path):
     assert recovered.get(batch["batch_id"])["status"] == "failed"
     assert recovered.events.run(batch["batch_id"])["status"] == "failed"
     assert recovered.events.events(batch["batch_id"])[-1]["event_type"] == "task_failed"
+
+
+def test_daily_batch_rows_use_paper_database_while_events_stay_in_research_database(tmp_path):
+    research_store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    legacy_store = DailyBatchStore(research_store)
+    legacy_batch, _ = legacy_store.prepare(
+        account_id="legacy-account", as_of="2026-07-22", config={"top_n": 3}
+    )
+
+    paper_store = SQLiteStore(tmp_path / "paper_trading.db")
+    split_store = DailyBatchStore(
+        paper_store,
+        event_store=RuntimeEventStore(research_store),
+        legacy_store=research_store,
+    )
+    assert split_store.get(legacy_batch["batch_id"])["account_id"] == "legacy-account"
+
+    created, _ = split_store.prepare(
+        account_id="split-account", as_of="2026-07-23", config={"top_n": 5}
+    )
+    split_store.events.prepare_run(
+        root_run_id=created["batch_id"],
+        task_key="paper_daily_batch",
+        contract_version="test-v1",
+        contract_hash="test-hash",
+        input_payload={"source": "test"},
+        domain_type="paper_daily_batch",
+        domain_id=created["batch_id"],
+    )
+    with paper_store.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM paper_daily_batch WHERE batch_id=?", (created["batch_id"],)
+        ).fetchone()[0] == 1
+        assert "runtime_run" not in {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    with research_store.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM paper_daily_batch WHERE batch_id=?", (created["batch_id"],)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM runtime_run WHERE root_run_id=?", (created["batch_id"],)
+        ).fetchone()[0] == 1

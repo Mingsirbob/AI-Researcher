@@ -40,7 +40,9 @@ def create_service(tmp_path):
     price_db = tmp_path / "stock_data_qfq.db"
     create_price_db(price_db)
     repository = StockRepository(price_db)
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    store = ResearchStore(
+        tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True
+    )
     store.bootstrap_securities(price_db)
     factor_lab = FactorLabService(
         store, repository, adjustment="CPS:2", universe="CSI300 current"

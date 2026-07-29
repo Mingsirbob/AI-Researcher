@@ -3,6 +3,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from app.data_access import StockRepository
 from app.paper_trading import PAPER_BENCHMARKS, PaperExecutionService, PaperTradingService
 from app.paper_strategies import (
@@ -14,6 +16,7 @@ from app.research_assessment import (
     RESEARCH_ASSESSMENT_SCHEMA_VERSION,
 )
 from app.research_store import ResearchStore
+from app.sqlite_store import SQLiteStore
 
 
 def _prices(path: Path) -> StockRepository:
@@ -32,7 +35,9 @@ def _prices(path: Path) -> StockRepository:
 
 def _service(tmp_path: Path, quote_provider=None) -> tuple[PaperTradingService, ResearchStore]:
     repo = _prices(tmp_path / "prices.db")
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    store = ResearchStore(
+        tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True
+    )
     store.bootstrap_securities(repo.db_path)
     now = "2026-07-20T08:00:00+00:00"
     with store.connect() as conn:
@@ -115,6 +120,65 @@ def _set_assessment_signal(store: ResearchStore, code: str, signal: str) -> None
             "UPDATE research_artifact SET status=?, payload_json=?, snapshot_hash=? WHERE artifact_id=?",
             (signal, payload_json, snapshot_hash, row["artifact_id"]),
         )
+
+
+def test_separate_paper_database_migrates_legacy_data_and_isolates_new_writes(tmp_path):
+    legacy_service, research_store = _service(tmp_path)
+    legacy_account = _insert_position(
+        legacy_service, research_store, code="000002.SZ", available_quantity=100
+    )
+    legacy_run = legacy_service.create_daily_run(
+        as_of="2026-07-20",
+        account_id=legacy_account["account_id"],
+        top_n=1,
+        hold_rank_buffer=30,
+    )
+    with research_store.connect() as conn:
+        conn.execute(
+            "UPDATE security_master SET security_name='迁移测试证券' WHERE security_code='000002.SZ'"
+        )
+        legacy_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("paper_account", "paper_position", "paper_daily_run", "paper_order")
+        }
+
+    paper_store = SQLiteStore(tmp_path / "paper_trading.db")
+    split_service = PaperTradingService(
+        legacy_service.repository,
+        research_store,
+        paper_store=paper_store,
+    )
+
+    with paper_store.connect() as conn:
+        migrated_counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in legacy_counts
+        }
+    assert migrated_counts == legacy_counts
+    assert split_service.run(legacy_run["run_id"])["run_id"] == legacy_run["run_id"]
+    dashboard = split_service.dashboard(legacy_account["account_id"], "2026-07-20")
+    assert dashboard["positions"][0]["security_name"] == "迁移测试证券"
+
+    created = split_service.create_account("拆库后账户", 500_000, "000300.SH")
+    with paper_store.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM paper_account WHERE account_id=?", (created["account_id"],)
+        ).fetchone()[0] == 1
+    with research_store.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM paper_account WHERE account_id=?", (created["account_id"],)
+        ).fetchone()[0] == 0
+
+    PaperTradingService(
+        legacy_service.repository,
+        research_store,
+        paper_store=paper_store,
+    )
+    with paper_store.connect() as conn:
+        assert {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in legacy_counts
+        } == {**legacy_counts, "paper_account": legacy_counts["paper_account"] + 1}
 
 
 def test_accounts_bind_independent_strategy_contracts(tmp_path):
@@ -585,8 +649,14 @@ def test_realtime_refresh_persists_quote_and_settles_at_official_open(tmp_path):
     assert result["filled"][0]["execution_quote_id"]
     assert service.run(run["run_id"])["status"] == "completed"
     dashboard = service.dashboard(as_of="2026-07-22")
-    assert dashboard["positions"][0]["close"] == 13.1
-    assert dashboard["positions"][0]["price_source"] == "iFinD THS_RQ"
+    position = dashboard["positions"][0]
+    assert position["close"] == 13.1
+    assert position["previous_close"] == 12.8
+    assert position["daily_pnl"] == pytest.approx((13.1 - 12.8) * position["quantity"])
+    assert position["unrealized_return"] == pytest.approx(13.1 / position["average_cost"] - 1)
+    assert position["risk_status"] == "仓位超限"
+    assert position["risk_flags"] == ["position_weight_limit", "t1_locked"]
+    assert position["price_source"] == "iFinD THS_RQ"
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM paper_realtime_quote").fetchone()[0] == 7
 

@@ -96,7 +96,7 @@ def test_snapshot_generation_filtering_idempotency_and_candidate_pool(tmp_path):
     stock_db = tmp_path / "stocks.db"
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True)
     store.bootstrap_securities(stock_db)
     service = FactorSnapshotService(repository, store)
 
@@ -128,7 +128,7 @@ def test_factor_filters_are_applied_before_pagination(tmp_path):
     stock_db = tmp_path / "stocks.db"
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True)
     store.bootstrap_securities(stock_db)
     snapshot = FactorSnapshotService(repository, store).generate("2026-07-20")
 
@@ -147,7 +147,7 @@ def test_quant_context_ranks_passed_and_excludes_bad_quality_rows(tmp_path):
     stock_db = tmp_path / "stocks.db"
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True)
     store.bootstrap_securities(stock_db)
     snapshot = FactorSnapshotService(repository, store).generate("2026-07-20")
 
@@ -174,7 +174,7 @@ def test_quant_context_respects_research_cutoff(tmp_path):
     stock_db = tmp_path / "stocks.db"
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True)
     store.bootstrap_securities(stock_db)
     snapshot = FactorSnapshotService(repository, store).generate("2026-07-20")
 
@@ -192,7 +192,7 @@ def test_m4_candidate_research_snapshot_and_thesis_monitor_chain(tmp_path):
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
     state_db = tmp_path / "state.db"
-    store = ResearchStore(state_db, tmp_path / "documents")
+    store = ResearchStore(state_db, tmp_path / "documents", retain_split_domains=True)
     store.bootstrap_securities(stock_db)
     factor_snapshot = FactorSnapshotService(repository, store).generate("2026-07-20")
     candidate = store.add_research_candidate(

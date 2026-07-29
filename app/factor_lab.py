@@ -22,6 +22,17 @@ from .research_store import ResearchStore, utc_now
 
 
 FACTOR_LAB_SCHEMA_VERSION = "factor-lab-v1"
+FACTOR_LAB_TABLES = (
+    "factor_formula_template",
+    "factor_definition",
+    "factor_version",
+    "factor_release_review",
+    "factor_set",
+    "factor_set_member",
+    "model_factor_binding",
+    "factor_lab_snapshot",
+    "factor_lab_value",
+)
 FACTOR_LIFECYCLE = ("draft", "testing", "shadow", "approved", "deprecated")
 FACTOR_TRANSITIONS = {
     "draft": {"testing", "deprecated"},
@@ -189,6 +200,8 @@ class FactorLabService:
         self.adjustment = adjustment
         self.universe = universe
         apply_migration(store.connect, "0008_factor_lab", self._create_schema)
+        if hasattr(store, "migrate_legacy"):
+            store.migrate_legacy("0018_split_factor_lab_database", FACTOR_LAB_TABLES)
         self._seed_catalog()
 
     def _create_schema(self) -> None:

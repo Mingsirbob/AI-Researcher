@@ -21,6 +21,12 @@ from .research_store import ResearchStore, utc_now
 FACTOR_BACKTEST_VERSION = "factor-backtest-v1.1"
 BENCHMARK_CODE = "CSI300_CURRENT_EQUAL_WEIGHT"
 BENCHMARK_NAME = "当前沪深300等权代理"
+FACTOR_BACKTEST_TABLES = (
+    "factor_backtest_run",
+    "factor_backtest_nav",
+    "factor_backtest_rebalance",
+    "factor_backtest_trade",
+)
 
 
 def _json(value: Any) -> str:
@@ -58,6 +64,10 @@ class FactorBacktestService:
         self.factor_evaluation = factor_evaluation
         self._lock = threading.Lock()
         apply_migration(store.connect, "0011_factor_backtest", self._create_schema)
+        if hasattr(store, "migrate_legacy"):
+            store.migrate_legacy(
+                "0020_split_factor_backtest_database", FACTOR_BACKTEST_TABLES
+            )
 
     def _create_schema(self) -> None:
         with self.store.connect() as conn:

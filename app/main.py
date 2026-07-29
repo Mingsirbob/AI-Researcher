@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -47,6 +47,9 @@ from .research_assessment import (
 )
 from .updater import IFindDailyClient, StockDataUpdater, default_end_date
 from .research_store import ResearchStore
+from .runtime_events import RuntimeEventStore
+from .sqlite_store import SQLiteStore
+from .quant_store import QuantStore
 from .research_workflow import (
     empty_financial_template,
 )
@@ -90,38 +93,48 @@ repo = StockRepository(settings.stock_db)
 thesis_store = ThesisStore(settings.state_db)
 ifind_service = IFindService(settings)
 research_store = ResearchStore(settings.state_db, settings.document_root)
-company_research_service = CompanyResearchService(repo, research_store, settings)
+paper_store = SQLiteStore(settings.paper_db)
+quant_store = QuantStore(settings.quant_db, research_store)
+company_research_service = CompanyResearchService(
+    repo, research_store, settings, quant_store=quant_store
+)
 announcement_pipeline = AnnouncementPipeline(research_store, ifind_service)
-factor_snapshot_service = FactorSnapshotService(repo, research_store)
+factor_snapshot_service = FactorSnapshotService(repo, quant_store)
 factor_lab_repository = (
     StockRepository(settings.stock_qfq_db) if settings.stock_qfq_db.exists() else repo
 )
 factor_lab_service = FactorLabService(
-    research_store,
+    quant_store,
     factor_lab_repository,
     adjustment="CPS:2" if settings.stock_qfq_db.exists() else "unadjusted",
     universe="CSI300 current" if settings.stock_qfq_db.exists() else "A-share local coverage",
 )
 factor_evaluation_service = (
-    FactorEvaluationService(research_store, factor_lab_repository, factor_lab_service)
+    FactorEvaluationService(quant_store, factor_lab_repository, factor_lab_service)
     if settings.stock_qfq_db.exists() else None
 )
 factor_backtest_service = (
     FactorBacktestService(
-        research_store, factor_lab_repository, factor_lab_service,
+        quant_store, factor_lab_repository, factor_lab_service,
         factor_evaluation_service,
     )
     if factor_evaluation_service else None
 )
-factor_release_service = FactorReleaseService(research_store)
+factor_release_service = FactorReleaseService(quant_store)
 evidence_acceptance_service = EvidenceAcceptanceService(
     research_store, ROOT / "data" / "acceptance" / "evidence_acceptance_v1.json"
 )
-decision_case_service = DecisionCaseService(research_store, thesis_store)
+decision_case_service = DecisionCaseService(research_store, thesis_store, quant_store)
 decision_outcome_service = DecisionOutcomeService(research_store)
-paper_trading_service = PaperTradingService(repo, research_store, ifind_service)
-current_shadow_service = CurrentShadowService(settings, research_store)
-daily_batch_store = DailyBatchStore(research_store)
+paper_trading_service = PaperTradingService(
+    repo, research_store, ifind_service, paper_store=paper_store, quant_store=quant_store
+)
+current_shadow_service = CurrentShadowService(settings, quant_store, research_store)
+daily_batch_store = DailyBatchStore(
+    paper_store,
+    event_store=RuntimeEventStore(research_store),
+    legacy_store=research_store,
+)
 daily_batch_runner = DailyBatchRunner(daily_batch_store)
 
 
@@ -230,9 +243,9 @@ app = FastAPI(title="Evidence AI Research", version="0.9.0", lifespan=lifespan)
 frontend_dist = ROOT / "frontend" / "dist"
 if (frontend_dist / "assets").is_dir():
     app.mount(
-        "/next/assets",
+        "/assets",
         StaticFiles(directory=frontend_dist / "assets"),
-        name="next-assets",
+        name="frontend-assets",
     )
 
 
@@ -252,20 +265,40 @@ def frontend_cutover_status() -> dict:
 
 
 @app.get("/", include_in_schema=False)
+@app.get("/paper", include_in_schema=False)
+@app.get("/company", include_in_schema=False)
+@app.get("/theses", include_in_schema=False)
+@app.get("/quant", include_in_schema=False)
+@app.get("/factor-development", include_in_schema=False)
+@app.get("/factor-evaluation", include_in_schema=False)
+@app.get("/backtest", include_in_schema=False)
+@app.get("/factor-library", include_in_schema=False)
+@app.get("/decisions", include_in_schema=False)
+@app.get("/acceptance", include_in_schema=False)
 def index() -> Response:
     return production_frontend_response(frontend_dist=frontend_dist)
 
 
 @app.get("/next", include_in_schema=False)
 @app.get("/next/{path:path}", include_in_schema=False)
-def next_index(path: str = "") -> FileResponse:
-    index_file = frontend_dist / "index.html"
-    if not index_file.is_file():
-        raise HTTPException(
-            status_code=503,
-            detail="Vue 前端尚未构建，请先在 frontend 目录运行 npm install && npm run build",
-        )
-    return FileResponse(index_file)
+def next_compatibility_redirect(path: str = "") -> Response:
+    frontend_paths = {
+        "": "/",
+        "paper": "/",
+        "company": "/company",
+        "theses": "/theses",
+        "quant": "/quant",
+        "factor-development": "/factor-development",
+        "factor-evaluation": "/factor-evaluation",
+        "backtest": "/backtest",
+        "factor-library": "/factor-library",
+        "decisions": "/decisions",
+        "acceptance": "/acceptance",
+    }
+    target = frontend_paths.get(path.strip("/"))
+    if target is None:
+        raise HTTPException(status_code=404, detail="前端路由不存在")
+    return RedirectResponse(url=target, status_code=307)
 
 
 @app.get("/api/health")
@@ -281,6 +314,7 @@ def health() -> dict:
         },
         "ifind": ifind_service.status(),
         "research_data": research_store.stats(),
+        "quant_data": quant_store.stats(),
         "database": settings.stock_db.name,
     }
 
@@ -654,7 +688,7 @@ async def generate_factor_snapshot(request: FactorSnapshotRequest) -> dict:
 
 @app.get("/api/factor-snapshots/latest")
 def latest_factor_snapshot() -> dict:
-    snapshot = research_store.latest_factor_snapshot()
+    snapshot = quant_store.latest_factor_snapshot()
     if snapshot is None:
         raise HTTPException(status_code=404, detail="尚未生成全市场因子快照")
     return snapshot
@@ -678,10 +712,10 @@ def factor_snapshot_securities(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> dict:
-    snapshot = research_store.factor_snapshot(snapshot_id)
+    snapshot = quant_store.factor_snapshot(snapshot_id)
     if snapshot is None or snapshot["status"] != "completed":
         raise HTTPException(status_code=404, detail="因子快照不存在或尚未完成")
-    result = research_store.list_factor_rows(
+    result = quant_store.list_factor_rows(
         snapshot_id,
         quality_status=quality_status,
         query=q,
@@ -920,12 +954,12 @@ def reject_factor_release(release_id: str, request: FactorReleaseDecision) -> di
 
 @app.get("/api/model-runs/latest")
 def latest_model_run() -> dict:
-    return {"item": research_store.latest_model_run()}
+    return {"item": quant_store.latest_model_run()}
 
 
 @app.get("/api/model-runs/{model_run_id}")
 def model_run(model_run_id: str) -> dict:
-    item = research_store.model_run(model_run_id)
+    item = quant_store.model_run(model_run_id)
     if item is None:
         raise HTTPException(status_code=404, detail="模型运行不存在")
     return item
@@ -942,7 +976,7 @@ def model_run_signals(
     offset: int = Query(0, ge=0),
 ) -> dict:
     try:
-        return research_store.list_shadow_signals(
+        return quant_store.list_shadow_signals(
             model_run_id,
             as_of=as_of.isoformat() if as_of else None,
             query=q,
@@ -957,14 +991,14 @@ def model_run_signals(
 
 @app.get("/api/model-runs/{model_run_id}/validation")
 def model_run_validation(model_run_id: str) -> dict:
-    if research_store.model_run(model_run_id) is None:
+    if quant_store.model_run(model_run_id) is None:
         raise HTTPException(status_code=404, detail="模型运行不存在")
-    return {"item": research_store.latest_model_validation(model_run_id)}
+    return {"item": quant_store.latest_model_validation(model_run_id)}
 
 
 @app.get("/api/current-shadow/latest")
 def latest_current_shadow() -> dict:
-    return {"item": research_store.latest_current_shadow()}
+    return {"item": quant_store.latest_current_shadow()}
 
 
 @app.get("/api/current-shadow/{snapshot_id}/signals")
@@ -977,7 +1011,7 @@ def current_shadow_signals(
     offset: int = Query(0, ge=0),
 ) -> dict:
     try:
-        return research_store.list_current_shadow_signals(
+        return quant_store.list_current_shadow_signals(
             snapshot_id,
             query=q,
             sort=sort,
@@ -1013,23 +1047,23 @@ async def hydrate_security_names(items: list[dict]) -> str | None:
 
 @app.get("/api/research-candidates")
 async def research_candidates() -> dict:
-    items = research_store.list_research_candidates()
+    items = quant_store.list_research_candidates()
     warning = await hydrate_security_names(items)
     if any(item.get("security_name") in {None, item["security_code"]} for item in items):
-        items = research_store.list_research_candidates()
+        items = quant_store.list_research_candidates()
     return {"items": items, "name_sync_warning": warning}
 
 
 @app.post("/api/research-candidates", status_code=201)
 async def add_research_candidate(request: ResearchCandidateCreate) -> dict:
     try:
-        candidate = research_store.add_research_candidate(
+        candidate = quant_store.add_research_candidate(
             request.code, request.snapshot_id, request.note
         )
         await hydrate_security_names([candidate])
         return next(
             item
-            for item in research_store.list_research_candidates()
+            for item in quant_store.list_research_candidates()
             if item["security_code"] == candidate["security_code"]
         )
     except ValueError as exc:
@@ -1043,7 +1077,7 @@ async def add_research_candidate(request: ResearchCandidateCreate) -> dict:
     response_model=None,
 )
 def remove_research_candidate(code: str) -> None:
-    if not research_store.remove_research_candidate(code):
+    if not quant_store.remove_research_candidate(code):
         raise HTTPException(status_code=404, detail="候选证券不存在")
 
 
@@ -1336,7 +1370,7 @@ async def build_paper_research_assessments(request: PaperResearchBatchRequest) -
             if code in existing_codes:
                 continue
             master = research_store.security(code) or {}
-            signal = research_store.current_shadow_signal(target_set["shadow_snapshot_id"], code)
+            signal = quant_store.current_shadow_signal(target_set["shadow_snapshot_id"], code)
             assessment_artifact = research_store.latest_research_assessment(code, target_date)
             assessment = assessment_artifact["payload"] if assessment_artifact else None
             target_set["targets"].append({

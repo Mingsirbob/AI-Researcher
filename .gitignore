@@ -28,6 +28,7 @@ logs/
 *.log
 
 # Editors and OS
+.vs/
 .idea/
 .vscode/
 .DS_Store

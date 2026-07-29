@@ -14,15 +14,24 @@
     "types:api": "openapi-typescript http://127.0.0.1:8000/openapi.json -o src/api/openapi.generated.ts"
   },
   "dependencies": {
+    "@perspective-dev/client": "^5.0.0",
+    "@perspective-dev/viewer": "^5.0.0",
+    "@perspective-dev/viewer-datagrid": "^5.0.0",
     "@tanstack/vue-query": "^5.83.0",
+    "ag-grid-community": "^36.0.2",
+    "ag-grid-vue3": "^36.0.2",
+    "echarts": "^6.1.0",
+    "lightweight-charts": "^5.2.0",
     "lucide-vue-next": "^0.468.0",
     "pinia": "^3.0.3",
     "vue": "^3.5.18",
+    "vue-echarts": "^8.0.1",
     "vue-router": "^4.5.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.54.1",
     "@types/node": "^24.0.15",
+    "@types/react": "^19.2.17",
     "@vitejs/plugin-vue": "^6.0.1",
     "@vue/test-utils": "^2.4.6",
     "jsdom": "^26.1.0",

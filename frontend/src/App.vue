@@ -13,7 +13,7 @@ const query = ref("");
 const searchOpen = ref(false);
 
 const groups = [
-  { label: "交易", items: [{ to: "/paper", label: "模拟盘", icon: Activity }] },
+  { label: "交易", items: [{ to: "/", label: "模拟盘", icon: Activity }] },
   { label: "公司", items: [{ to: "/company", label: "公司分析", icon: Building2 }, { to: "/theses", label: "长期论点", icon: FileSearch }] },
   { label: "量化实验室", items: [{ to: "/quant", label: "数据与特征", icon: BarChart3 }, { to: "/factor-development", label: "因子开发", icon: FlaskConical }, { to: "/factor-evaluation", label: "因子评价", icon: Beaker }, { to: "/backtest", label: "策略回测", icon: BookOpenCheck }, { to: "/factor-library", label: "因子库", icon: ClipboardCheck }] },
   { label: "审计", items: [{ to: "/decisions", label: "案例评价", icon: ShieldCheck }, { to: "/acceptance", label: "质量验收", icon: ClipboardCheck }] },
@@ -38,7 +38,7 @@ function openSecurity(code: string) {
   <div class="app-frame">
     <header class="topbar">
       <button class="icon-button mobile-menu" title="打开导航" @click="ui.navOpen = true"><Menu :size="19" /></button>
-      <RouterLink to="/paper" class="brand"><span>迹</span><div><b>迹研</b><small>EVIDENCE RESEARCH</small></div></RouterLink>
+      <RouterLink to="/" class="brand"><span>迹</span><div><b>迹研</b><small>EVIDENCE RESEARCH</small></div></RouterLink>
       <div class="global-search">
         <Search :size="17" />
         <input v-model="query" placeholder="输入代码或公司名称" aria-label="搜索股票" @focus="searchOpen = true" @keydown.enter="openSecurity(query.trim().toUpperCase())" />

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, defineAsyncComponent, reactive, ref } from "vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { Database, Play } from "lucide-vue-next";
+import { ChartNoAxesCombined, Database, Play, Table2 } from "lucide-vue-next";
 import { api, openApiJsonBody } from "@/api/client";
 import { shortId } from "@/lib/format";
 import { useUiStore } from "@/stores/ui";
@@ -10,6 +10,10 @@ import MetricStrip from "@/components/MetricStrip.vue";
 import PageHeader from "@/components/PageHeader.vue";
 import type { ApiList, FactorLabRun, FactorRelease, FactorVersion } from "@/api/types";
 import FactorReleaseSection from "./components/FactorReleaseSection.vue";
+import ResearchDataGrid from "@/components/ResearchDataGrid.vue";
+import type { ColDef } from "ag-grid-community";
+
+const FactorPerspective = defineAsyncComponent(() => import("@/components/FactorPerspective.vue"));
 
 interface Overview { factor_count?: number; status_counts?: Record<string, number> }
 interface Snapshot { snapshot_id: string; as_of: string }
@@ -20,6 +24,7 @@ const client = useQueryClient();
 const status = ref("");
 const asOf = ref("");
 const selectedFactor = ref("");
+const valueView = ref<"grid" | "perspective">("grid");
 const releaseForm = reactive({ acknowledged: false, reviewer: "human" });
 const releaseNotes = reactive<Record<string, string>>({});
 const overview = useQuery({ queryKey: ["factor-lab", "overview"], queryFn: () => api<Overview>("/api/factor-lab/overview") });
@@ -31,9 +36,18 @@ const releases = useQuery({ queryKey: ["factor-lab", "releases"], queryFn: () =>
 const snapshotItem = computed(() => snapshot.data.value?.item);
 const values = useQuery({
   queryKey: computed(() => ["factor-lab", "values", snapshotItem.value?.snapshot_id, selectedFactor.value]),
-  queryFn: () => api<ApiList<SnapshotValue>>(`/api/factor-lab/snapshots/${snapshotItem.value?.snapshot_id}/values?factor_id=${encodeURIComponent(selectedFactor.value)}&limit=100`),
+  queryFn: () => api<ApiList<SnapshotValue>>(`/api/factor-lab/snapshots/${snapshotItem.value?.snapshot_id}/values?factor_id=${encodeURIComponent(selectedFactor.value)}&limit=1000`),
   enabled: computed(() => Boolean(snapshotItem.value?.snapshot_id && selectedFactor.value)),
 });
+const valueColumns: ColDef[] = [
+  { field: "cross_section_rank", headerName: "排名", sort: "asc", pinned: "left", maxWidth: 96, valueFormatter: ({ value }) => value == null ? "—" : `#${value}` },
+  { field: "security_name", headerName: "证券", pinned: "left", minWidth: 130 },
+  { field: "security_code", headerName: "代码", minWidth: 112 },
+  { field: "raw_value", headerName: "原始值", filter: "agNumberColumnFilter", minWidth: 120 },
+  { field: "percentile", headerName: "百分位", filter: "agNumberColumnFilter", valueFormatter: ({ value }) => value == null ? "—" : `${value}%`, minWidth: 110 },
+  { field: "factor_id", headerName: "因子", minWidth: 150 },
+  { field: "factor_version", headerName: "版本", maxWidth: 86 },
+];
 const summary = computed(() => [
   { label: "注册因子", value: overview.data.value?.factor_count ?? factors.data.value?.items?.length ?? "—", note: "包含所有状态" },
   { label: "测试中", value: overview.data.value?.status_counts?.testing ?? "—", note: "尚未进入模型" },
@@ -92,9 +106,19 @@ async function moveToTesting(item: FactorVersion) {
       <AsyncState :loading="factors.isPending.value" :error="factors.error.value" :empty="!factors.data.value?.items?.length" @retry="factors.refetch()">
         <div class="list"><article v-for="item in factors.data.value?.items || []" :key="`${item.factor_id}-${item.version}`" class="list-item"><header><div><span :class="['status', item.status === 'draft' ? 'warn' : '']">{{ item.lifecycle_status || item.status }}</span><h3 style="margin-top:8px">{{ item.name }} <small>v{{ item.version }}</small></h3></div><code>{{ item.factor_id }}</code></header><p>{{ item.description }}</p><p class="mono">{{ item.expression || item.formula }}</p><footer><button v-if="(item.lifecycle_status || item.status) === 'draft'" class="button secondary" @click="moveToTesting(item)"><Play :size="13" />进入测试</button><span class="muted">{{ item.template_id }} · {{ item.direction }}</span></footer></article></div>
       </AsyncState>
-      <div class="section-heading" style="margin-top:26px"><div><span>SNAPSHOT VALUES</span><b>横截面排名</b></div><label for="factor-selection" class="sr-only">选择因子</label><select id="factor-selection" v-model="selectedFactor"><option value="">选择因子</option><option v-for="item in factors.data.value?.items || []" :key="`${item.factor_id}-${item.version}`" :value="item.factor_id">{{ item.name }} · v{{ item.version }}</option></select></div>
-      <AsyncState :loading="values.isFetching.value" :error="values.error.value" :empty="!selectedFactor" empty-text="请先选择要查看的因子"><div class="data-table-wrap"><table class="data-table"><thead><tr><th>排名</th><th>证券</th><th>原始值</th><th>百分位</th><th>版本</th></tr></thead><tbody><tr v-for="item in values.data.value?.items || []" :key="item.security_code"><td>#{{ item.cross_section_rank }}</td><td><b>{{ item.security_name || item.security_code }}</b><br><small>{{ item.security_code }}</small></td><td>{{ item.raw_value }}</td><td>{{ item.percentile }}%</td><td><code>{{ item.factor_id }}@v{{ item.factor_version }}</code></td></tr></tbody></table></div></AsyncState>
+      <div class="section-heading" style="margin-top:26px"><div><span>SNAPSHOT VALUES</span><b>横截面排名与交互透视</b></div><div class="snapshot-tools"><label for="factor-selection" class="sr-only">选择因子</label><select id="factor-selection" v-model="selectedFactor"><option value="">选择因子</option><option v-for="item in factors.data.value?.items || []" :key="`${item.factor_id}-${item.version}`" :value="item.factor_id">{{ item.name }} · v{{ item.version }}</option></select><div class="segmented" aria-label="横截面显示方式"><button :class="{active:valueView==='grid'}" title="数据表" @click="valueView='grid'"><Table2 :size="14" /></button><button :class="{active:valueView==='perspective'}" title="交互透视" @click="valueView='perspective'"><ChartNoAxesCombined :size="14" /></button></div></div></div>
+      <AsyncState :loading="values.isFetching.value" :error="values.error.value" :empty="!selectedFactor" empty-text="请先选择要查看的因子"><ResearchDataGrid v-if="valueView==='grid'" :rows="values.data.value?.items || []" :columns="valueColumns" row-id="security_code" :height="520" empty-text="该因子没有横截面数据" /><Suspense v-else><FactorPerspective :rows="values.data.value?.items || []" /><template #fallback><p class="perspective-loading">正在加载交互透视引擎…</p></template></Suspense></AsyncState>
     </section>
     <FactorReleaseSection :evaluation="evaluation.data.value?.item?.run" :backtest="backtest.data.value?.item?.run" :releases="releases.data.value?.items || []" :release-target="releaseTarget" :release-form="releaseForm" :release-notes="releaseNotes" :creating="createRelease.isPending.value" @create="createRelease.mutate()" @decide="decideRelease" />
   </div>
 </template>
+
+<style scoped>
+.snapshot-tools { display: flex; align-items: center; gap: 8px; }
+.segmented { display: inline-grid; grid-template-columns: repeat(2, 34px); border: 1px solid var(--line-dark); }
+.segmented button { width: 34px; height: 34px; display: grid; place-items: center; padding: 0; border: 0; border-right: 1px solid var(--line-dark); color: var(--muted); background: white; }
+.segmented button:last-child { border-right: 0; }
+.segmented button.active { color: white; background: var(--ink); }
+.perspective-loading { height: 520px; display: grid; place-items: center; margin: 0; border: 1px solid var(--line); color: var(--muted); }
+@media (max-width: 700px) { .snapshot-tools { width: 100%; align-items: stretch; } .snapshot-tools select { min-width: 0; flex: 1; } }
+</style>

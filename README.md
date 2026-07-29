@@ -9,7 +9,15 @@
 - 每条结论绑定 Evidence ID、数据日期、来源与计算方法。
 - AI 仅接收已计算证据，并经过 JSON Schema 与证据引用校验。
 - AI 服务不可用时自动降级为确定性报告。
-- 研究论点保存在独立的 `data/research_state.db`，原行情库始终只读。
+- 公告、财务、研究、决策、Thesis 与运行审计保存在 `data/research_state.db`；因子、模型、Shadow、评价与回测保存在 `data/quant_research.db`；模拟账户、策略、订单、持仓、净值和每日模拟批次保存在 `data/paper_trading.db`。原行情库始终只读。
+
+首次使用拆分版本启动时，迁移 `0014_split_paper_trading_database` 和
+`0015_split_paper_daily_batch_database` 会把旧状态库中的模拟盘数据幂等复制到
+`paper_trading.db`。迁移完成后的新增模拟盘写入仅进入新库。
+量化拆分迁移 `0017` 至 `0021` 采用相同策略，将旧量化数据复制到
+`quant_research.db`，并在启动时从研究库批量同步只读证券主数据投影。
+正式模式随后由 `0022_retire_split_domain_tables` 删除研究库中的旧模拟盘和量化表；
+回滚依赖迁移前数据库备份，不再保留运行时旧库回退。
 - 可选使用本机 iFinD SDK 补充证券简称和近期公告证据。
 
 当前仍不包含完整行业、同行和估值数据。当前 Shadow Signal 可以作为 DecisionCase 吸引力的一个显式分项，但不能覆盖证据、风险或准入门禁。人工批准只允许进入后续 Shadow 评价，系统不会输出买卖建议或目标价。
@@ -33,8 +41,8 @@ python run.py
 默认打开 `http://127.0.0.1:8000`；也可通过环境变量或启动参数使用其他端口。
 
 Vue 3 是唯一生产前端。运行 `npm ci && npm run build` 后，访问
-`http://127.0.0.1:8000` 会重定向到 `/next/paper`。若构建产物缺失，根入口返回
-503；生产回滚通过恢复上一完整 Git/部署版本完成。迁移范围、开发方式和退役记录见
+`http://127.0.0.1:8000` 会直接打开模拟盘；其他页面使用 `/company`、`/backtest`
+等根级路由。若构建产物缺失，根入口返回503；生产回滚通过恢复上一完整 Git/部署版本完成。迁移范围、开发方式和退役记录见
 `docs/VUE3_MIGRATION.md`。
 
 ### iFinD 配置

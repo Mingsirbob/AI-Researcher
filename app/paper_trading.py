@@ -22,6 +22,7 @@ from .portfolio_decision import (
     PortfolioDecisionService,
 )
 from .research_store import ResearchStore, utc_now
+from .sqlite_store import SQLiteStore, migrate_legacy_tables
 
 
 PAPER_BENCHMARKS = {
@@ -33,6 +34,17 @@ PAPER_BENCHMARKS = {
     "000510.CSI": "中证A500",
 }
 
+PAPER_TRADING_TABLES = (
+    "paper_strategy",
+    "paper_account",
+    "paper_daily_run",
+    "paper_order",
+    "paper_position",
+    "paper_nav_snapshot",
+    "paper_realtime_quote",
+    "paper_benchmark_price",
+)
+
 
 def _normalize_paper_quote_code(value: str) -> str:
     cleaned = value.strip().upper().replace("_", ".")
@@ -42,20 +54,36 @@ def _normalize_paper_quote_code(value: str) -> str:
 
 
 class _PaperExecutionCore:
-    def __init__(self, repository: StockRepository, store: ResearchStore, quote_provider: Any | None = None):
+    def __init__(
+        self,
+        repository: StockRepository,
+        store: ResearchStore,
+        quote_provider: Any | None = None,
+        paper_store: SQLiteStore | ResearchStore | None = None,
+        quant_store: ResearchStore | None = None,
+    ):
         self.repository = repository
         self.store = store
+        self.paper_store = paper_store or store
+        self.quant_store = quant_store or store
         self.quote_provider = quote_provider
         self._initialize()
 
     def _initialize(self) -> None:
-        apply_migration(self.store.connect, "0003_paper_trading", self._create_schema)
-        apply_migration(self.store.connect, "0007_paper_benchmarks", self._create_benchmark_schema)
-        apply_migration(self.store.connect, "0013_paper_strategies", self._create_strategy_schema)
+        apply_migration(self.paper_store.connect, "0003_paper_trading", self._create_schema)
+        apply_migration(self.paper_store.connect, "0007_paper_benchmarks", self._create_benchmark_schema)
+        apply_migration(self.paper_store.connect, "0013_paper_strategies", self._create_strategy_schema)
+        migrate_legacy_tables(
+            target=self.paper_store,
+            source=self.store,
+            migration_id="0014_split_paper_trading_database",
+            tables=PAPER_TRADING_TABLES,
+            replace_tables=("paper_strategy",),
+        )
         self._recover_run_statuses()
 
     def _create_strategy_schema(self) -> None:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS paper_strategy (
                     strategy_id TEXT PRIMARY KEY,
@@ -92,7 +120,7 @@ class _PaperExecutionCore:
             )
 
     def _create_benchmark_schema(self) -> None:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS paper_benchmark_price (
@@ -112,7 +140,7 @@ class _PaperExecutionCore:
             )
 
     def _create_schema(self) -> None:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS paper_account (
@@ -231,7 +259,7 @@ class _PaperExecutionCore:
             )
 
     def _recover_run_statuses(self) -> None:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.execute(
                 """UPDATE paper_daily_run SET status=CASE
                     WHEN EXISTS (SELECT 1 FROM paper_order o WHERE o.run_id=paper_daily_run.run_id AND o.status='proposed')
@@ -249,7 +277,7 @@ class _PaperExecutionCore:
         return item
 
     def _strategy(self, strategy_id: str) -> dict:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM paper_strategy WHERE strategy_id=? AND status='active'",
                 (strategy_id,),
@@ -259,7 +287,7 @@ class _PaperExecutionCore:
         return self._decode_json(dict(row), "config")
 
     def list_strategies(self) -> list[dict]:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM paper_strategy WHERE status='active' ORDER BY name, strategy_id"
             ).fetchall()
@@ -275,7 +303,7 @@ class _PaperExecutionCore:
         self._strategy(strategy_id)
         now = utc_now()
         account_id = str(uuid.uuid4())
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.execute(
                 """INSERT INTO paper_account
                 (account_id, name, initial_cash, cash, benchmark_code, status,
@@ -286,14 +314,14 @@ class _PaperExecutionCore:
         return self.account(account_id)
 
     def list_accounts(self) -> list[dict]:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM paper_account WHERE status='active' ORDER BY created_at, account_id"
             ).fetchall()
         return [self._with_strategy(dict(row)) for row in rows]
 
     def default_account(self) -> dict:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             row = conn.execute(
                 "SELECT * FROM paper_account WHERE status='active' ORDER BY created_at LIMIT 1"
             ).fetchone()
@@ -302,7 +330,7 @@ class _PaperExecutionCore:
         )
 
     def account(self, account_id: str) -> dict:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             row = conn.execute("SELECT * FROM paper_account WHERE account_id=?", (account_id,)).fetchone()
         if row is None:
             raise KeyError("模拟账户不存在")
@@ -316,7 +344,7 @@ class _PaperExecutionCore:
         if end is None:
             raise ValueError("本地行情库没有可用截止日")
         date.fromisoformat(end)
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             row = conn.execute(
                 """SELECT MIN(fill_date) FROM paper_order
                    WHERE account_id=? AND status='filled' AND fill_date<=?""",
@@ -366,7 +394,7 @@ class _PaperExecutionCore:
             normalized.append(
                 (account_id, code, trading_date, close, source, canonical_hash(payload), utc_now())
             )
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.executemany(
                 """INSERT INTO paper_benchmark_price
                    (account_id, benchmark_code, trading_date, close, source, snapshot_hash, fetched_at)
@@ -405,7 +433,7 @@ class _PaperExecutionCore:
             default=None,
         )
         comparison_end = max(as_of, live_date) if live_date else as_of
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             first_fill_row = conn.execute(
                 """SELECT MIN(fill_date) FROM paper_order
                    WHERE account_id=? AND status='filled' AND fill_date<=?""",
@@ -469,7 +497,7 @@ class _PaperExecutionCore:
             portfolio_points.append(live_portfolio_point)
             portfolio_points.sort(key=lambda item: item["date"])
         portfolio_latest = portfolio_points[-1]["cumulative_return"]
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             price_rows = [dict(row) for row in conn.execute(
                 """SELECT benchmark_code, trading_date, close, source, snapshot_hash
                    FROM paper_benchmark_price
@@ -560,7 +588,7 @@ class _PaperExecutionCore:
 
     def position_codes(self, account_id: str | None = None) -> list[str]:
         account = self.account(account_id) if account_id else self.default_account()
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             rows = conn.execute(
                 """SELECT security_code FROM paper_position
                    WHERE account_id=? AND quantity>0 ORDER BY security_code""",
@@ -624,7 +652,7 @@ class _PaperExecutionCore:
             code: ["benchmark_comparison"] for code in PAPER_BENCHMARKS
         }
         scope.setdefault(account["benchmark_code"], []).append("account_benchmark")
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             positions = conn.execute(
                 "SELECT security_code FROM paper_position WHERE account_id=? AND quantity>0",
                 (account["account_id"],),
@@ -694,7 +722,7 @@ class _PaperExecutionCore:
             payload = {**quote, "account_id": account["account_id"], "purpose": purposes}
             snapshot_hash = canonical_hash(payload, compact=False)
             snapshot_id = snapshot_hash
-            with self.store.connect() as conn:
+            with self.paper_store.connect() as conn:
                 conn.execute(
                     """INSERT OR IGNORE INTO paper_realtime_quote
                     (snapshot_id, account_id, security_code, quote_time, trading_date, received_at,
@@ -725,7 +753,7 @@ class _PaperExecutionCore:
         if codes:
             code_filter = f" AND q.security_code IN ({','.join('?' for _ in codes)})"
             params.extend(codes)
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             rows = conn.execute(
                 f"""SELECT q.* FROM paper_realtime_quote q
                 WHERE q.account_id=? {code_filter}
@@ -742,28 +770,58 @@ class _PaperExecutionCore:
             items.append(item)
         return items
 
-    def _positions(self, account_id: str, as_of: str, shadow_snapshot_id: str | None = None,
-                   price_overrides: dict[str, dict] | None = None) -> list[dict]:
+    def _security_metadata(self, codes: list[str]) -> dict[str, dict]:
+        unique_codes = sorted(set(codes))
+        if not unique_codes:
+            return {}
+        placeholders = ",".join("?" for _ in unique_codes)
         with self.store.connect() as conn:
             rows = conn.execute(
-                """SELECT p.*, COALESCE(m.security_name, p.security_code) security_name,
-                          m.industry_l1
-                FROM paper_position p LEFT JOIN security_master m ON m.security_code=p.security_code
-                WHERE p.account_id=? AND p.quantity>0 ORDER BY p.security_code""",
+                f"""SELECT security_code, security_name, industry_l1
+                    FROM security_master WHERE security_code IN ({placeholders})""",
+                unique_codes,
+            ).fetchall()
+        return {row["security_code"]: dict(row) for row in rows}
+
+    def _positions(self, account_id: str, as_of: str, shadow_snapshot_id: str | None = None,
+                   price_overrides: dict[str, dict] | None = None) -> list[dict]:
+        with self.paper_store.connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM paper_position
+                   WHERE account_id=? AND quantity>0 ORDER BY security_code""",
                 (account_id,),
             ).fetchall()
+        metadata = self._security_metadata([row["security_code"] for row in rows])
         items = []
         for row in rows:
             item = dict(row)
+            profile = metadata.get(item["security_code"], {})
+            item["security_name"] = profile.get("security_name") or item["security_code"]
+            item["industry_l1"] = profile.get("industry_l1")
             realtime = (price_overrides or {}).get(item["security_code"])
             price = None if realtime else self._price(item["security_code"], as_of)
             close = realtime["latest"] if realtime else (price[1] if price else None)
+            previous_close = realtime.get("previous_close") if realtime else None
+            if not realtime and price:
+                previous_day = (date.fromisoformat(price[0]) - timedelta(days=1)).isoformat()
+                previous_price = self._price(item["security_code"], previous_day)
+                previous_close = previous_price[1] if previous_price else None
             item["close"] = close
+            item["previous_close"] = previous_close
             item["price_source"] = realtime["source"] if realtime else "local_daily_close"
             item["quote_time"] = realtime["quote_time"] if realtime else (price[0] if price else None)
             item["market_value"] = close * item["quantity"] if close else None
             item["unrealized_pnl"] = (close - item["average_cost"]) * item["quantity"] if close else None
-            signal = self.store.current_shadow_signal(shadow_snapshot_id, item["security_code"]) if shadow_snapshot_id else None
+            item["unrealized_return"] = (
+                close / item["average_cost"] - 1 if close and item["average_cost"] else None
+            )
+            item["daily_pnl"] = (
+                (close - previous_close) * item["quantity"]
+                if close and previous_close else None
+            )
+            signal = self.quant_store.current_shadow_signal(
+                shadow_snapshot_id, item["security_code"]
+            ) if shadow_snapshot_id else None
             item["shadow_rank"] = signal["cross_section_rank"] if signal else None
             items.append(item)
         return items
@@ -773,7 +831,7 @@ class _PaperExecutionCore:
         positions = self._positions(account["account_id"], trading_date, price_overrides=price_overrides)
         market_value = sum(item["market_value"] or 0 for item in positions)
         nav = account["cash"] + market_value
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             prior = conn.execute(
                 "SELECT * FROM paper_nav_snapshot WHERE account_id=? AND trading_date<? ORDER BY trading_date DESC LIMIT 1",
                 (account["account_id"], trading_date),
@@ -809,7 +867,7 @@ class _PaperExecutionCore:
                 "turnover": turnover, "benchmark_return": None, "excess_return": None}
 
     def _run_for_date(self, account_id: str, as_of: str, strategy_version: str) -> dict | None:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             row = conn.execute(
                 "SELECT run_id FROM paper_daily_run WHERE account_id=? AND as_of=? AND strategy_version=?",
                 (account_id, as_of, strategy_version),
@@ -820,7 +878,7 @@ class _PaperExecutionCore:
         self, account_id: str, as_of: str, active_run_id: str, strategy_version: str
     ) -> None:
         now = utc_now()
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.execute(
                 """UPDATE paper_order SET status='cancelled',
                    review_note=COALESCE(review_note || '；', '') || ?,
@@ -837,22 +895,30 @@ class _PaperExecutionCore:
             )
 
     def run(self, run_id: str) -> dict:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             row = conn.execute("SELECT * FROM paper_daily_run WHERE run_id=?", (run_id,)).fetchone()
             orders = conn.execute(
-                """SELECT o.*, COALESCE(m.security_name, o.security_code) security_name
-                FROM paper_order o LEFT JOIN security_master m ON m.security_code=o.security_code
-                WHERE o.run_id=? ORDER BY CASE o.side WHEN 'sell' THEN 0 ELSE 1 END, o.created_at""", (run_id,)
+                """SELECT * FROM paper_order WHERE run_id=?
+                   ORDER BY CASE side WHEN 'sell' THEN 0 ELSE 1 END, created_at""",
+                (run_id,),
             ).fetchall()
         if row is None:
             raise KeyError("模拟研究批次不存在")
+        metadata = self._security_metadata([order["security_code"] for order in orders])
         item = self._decode_json(dict(row), "config", "market_summary")
-        item["orders"] = [self._decode_json(dict(order), "reason") for order in orders]
+        item["orders"] = []
+        for order in orders:
+            decoded = self._decode_json(dict(order), "reason")
+            decoded["security_name"] = (
+                metadata.get(decoded["security_code"], {}).get("security_name")
+                or decoded["security_code"]
+            )
+            item["orders"].append(decoded)
         return item
 
     def review_order(self, order_id: str, decision: str, reviewer: str, note: str) -> dict:
         status = "approved" if decision == "approve" else "rejected"
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             row = conn.execute("SELECT * FROM paper_order WHERE order_id=?", (order_id,)).fetchone()
             if row is None:
                 raise KeyError("模拟订单不存在")
@@ -866,7 +932,7 @@ class _PaperExecutionCore:
         return self.run(row["run_id"])
 
     def _refresh_run_status(self, run_id: str) -> None:
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             run = conn.execute("SELECT status FROM paper_daily_run WHERE run_id=?", (run_id,)).fetchone()
             if run is None or run["status"] == "superseded":
                 return
@@ -889,7 +955,7 @@ class _PaperExecutionCore:
         fees = max(MIN_COMMISSION, gross * COMMISSION_RATE)
         if order["side"] == "sell":
             fees += gross * SELL_STAMP_DUTY_RATE
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             current = conn.execute(
                 "SELECT * FROM paper_position WHERE account_id=? AND security_code=?",
                 (account_id, order["security_code"]),
@@ -963,7 +1029,7 @@ class _PaperExecutionCore:
         date.fromisoformat(execution_date)
         account = self.account(account_id) if account_id else self.default_account()
         filled, skipped, turnover = [], [], 0.0
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.execute(
                 "UPDATE paper_position SET available_quantity=quantity, updated_at=? WHERE account_id=? AND COALESCE(last_buy_date, '')<?",
                 (utc_now(), account["account_id"], execution_date),
@@ -1000,7 +1066,7 @@ class _PaperExecutionCore:
         trading_dates = [quote["trading_date"] for quote in quotes.values()]
         execution_date = max(trading_dates) if trading_dates else date.today().isoformat()
         filled, skipped, turnover = [], [], 0.0
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.execute(
                 "UPDATE paper_position SET available_quantity=quantity, updated_at=? "
                 "WHERE account_id=? AND COALESCE(last_buy_date, '')<?",
@@ -1053,7 +1119,7 @@ class _PaperExecutionCore:
     def dashboard(self, account_id: str | None = None, as_of: str | None = None) -> dict:
         account = self.account(account_id) if account_id else self.default_account()
         as_of = as_of or self.store.market_data_end()
-        latest_shadow = self.store.latest_current_shadow()
+        latest_shadow = self.quant_store.latest_current_shadow()
         realtime_quotes = self._latest_realtime_quotes(account["account_id"])
         realtime_by_code = {
             item["security_code"]: item for item in realtime_quotes
@@ -1064,7 +1130,7 @@ class _PaperExecutionCore:
             latest_shadow["snapshot_id"] if latest_shadow else None,
             realtime_by_code,
         )
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             run_rows = conn.execute(
                 "SELECT run_id FROM paper_daily_run WHERE account_id=? ORDER BY as_of DESC, created_at DESC LIMIT 20",
                 (account["account_id"],),
@@ -1075,8 +1141,23 @@ class _PaperExecutionCore:
             ).fetchall()]
         runs = [self.run(row["run_id"]) for row in run_rows]
         current_nav = account["cash"] + sum(item["market_value"] or 0 for item in positions)
+        max_position_weight = float(account["strategy"]["config"].get("max_position_weight") or 0)
         for item in positions:
             item["weight"] = (item["market_value"] or 0) / current_nav if current_nav else 0
+            risk_flags = []
+            if item["close"] is None:
+                risk_flags.append("missing_price")
+            if max_position_weight and item["weight"] > max_position_weight + 1e-8:
+                risk_flags.append("position_weight_limit")
+            if item["available_quantity"] < item["quantity"]:
+                risk_flags.append("t1_locked")
+            item["risk_flags"] = risk_flags
+            item["risk_status"] = (
+                "行情缺失" if "missing_price" in risk_flags
+                else "仓位超限" if "position_weight_limit" in risk_flags
+                else "T+1锁定" if "t1_locked" in risk_flags
+                else "正常"
+            )
         performance_as_of = nav_rows[-1]["trading_date"] if nav_rows else as_of
         benchmark_comparison = self.benchmark_comparison(
             account,
@@ -1112,9 +1193,13 @@ class PaperExecutionService(_PaperExecutionCore):
         store: ResearchStore,
         quote_provider: Any | None = None,
         portfolio_decision: PortfolioDecisionService | None = None,
+        paper_store: SQLiteStore | ResearchStore | None = None,
+        quant_store: ResearchStore | None = None,
     ) -> None:
-        super().__init__(repository, store, quote_provider)
-        self.portfolio_decision = portfolio_decision or PortfolioDecisionService(repository, store)
+        super().__init__(repository, store, quote_provider, paper_store, quant_store)
+        self.portfolio_decision = portfolio_decision or PortfolioDecisionService(
+            repository, quant_store or store, store
+        )
 
     def research_targets(
         self, *, as_of: str, account_id: str | None = None,
@@ -1171,7 +1256,7 @@ class PaperExecutionService(_PaperExecutionCore):
             defaults.get("max_pair_correlation", DEFAULT_MAX_PAIR_CORRELATION)
             if max_pair_correlation is None else max_pair_correlation
         )
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             latest_fill = conn.execute(
                 "SELECT MAX(fill_date) FROM paper_order WHERE account_id=? AND status='filled'",
                 (account["account_id"],),
@@ -1205,7 +1290,7 @@ class PaperExecutionService(_PaperExecutionCore):
             max_pair_correlation=max_pair_correlation,
             strategy=strategy,
         )
-        with self.store.connect() as conn:
+        with self.paper_store.connect() as conn:
             conn.execute(
                 """INSERT INTO paper_daily_run
                 (run_id, account_id, as_of, factor_snapshot_id, shadow_snapshot_id, strategy_version,

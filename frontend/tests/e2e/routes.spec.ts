@@ -7,7 +7,7 @@ for (const route of routes) {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
-    await page.goto(`/next/${route}`);
+    await page.goto(route === "paper" ? "/" : `/${route}`);
     await page.waitForLoadState("networkidle");
     await expect(page.locator("main.workspace")).toBeVisible();
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -19,4 +19,10 @@ for (const route of routes) {
 test("retired legacy route is not available", async ({ request }) => {
   const response = await request.get("/legacy");
   expect(response.status()).toBe(404);
+});
+
+test("old next route redirects to the root application", async ({ request }) => {
+  const response = await request.get("/next/paper", { maxRedirects: 0 });
+  expect(response.status()).toBe(307);
+  expect(response.headers().location).toBe("/");
 });

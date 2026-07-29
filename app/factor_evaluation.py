@@ -22,6 +22,12 @@ from .research_store import ResearchStore, utc_now
 FACTOR_EVALUATION_VERSION = "factor-evaluation-v1"
 DEFAULT_HORIZONS = (1, 5, 20)
 MIN_CROSS_SECTION = 30
+FACTOR_EVALUATION_TABLES = (
+    "factor_evaluation_run",
+    "factor_evaluation_period",
+    "factor_evaluation_metric",
+    "factor_evaluation_correlation",
+)
 
 
 def _json(value: Any) -> str:
@@ -77,6 +83,10 @@ class FactorEvaluationService:
             "0010_factor_qfq_liquidity_contract",
             self._deprecate_incompatible_qfq_turnover,
         )
+        if hasattr(store, "migrate_legacy"):
+            store.migrate_legacy(
+                "0019_split_factor_evaluation_database", FACTOR_EVALUATION_TABLES
+            )
 
     def _deprecate_incompatible_qfq_turnover(self) -> None:
         now = utc_now()

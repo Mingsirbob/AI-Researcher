@@ -14,14 +14,16 @@ test("backtest renders run-level metrics and the current rebalance contract", as
     if (url.pathname.endsWith("/model-runs/latest") || url.pathname.endsWith("/current-shadow/latest")) return json(route, { item: null });
     return json(route, { items: [] });
   });
-  await page.goto("/next/backtest");
+  await page.goto("/backtest");
   const metrics = page.locator(".metric-strip");
   await expect(metrics).toContainText("30.00%");
   await expect(metrics).toContainText("10.00%");
   await expect(metrics).toContainText("-20.00%");
-  const rebalance = page.getByRole("row").filter({ hasText: "2026-07-23 / 2026-07-24" });
-  await expect(rebalance.getByRole("cell").nth(3)).toHaveText("2");
-  await expect(rebalance.getByRole("cell").nth(5)).toContainText("150");
+  const rebalance = page.getByRole("row").filter({ hasText: "2026-07-23" });
+  await expect(rebalance).toBeVisible();
+  await expect(rebalance).toContainText("2026-07-24");
+  await expect(rebalance.getByRole("gridcell").nth(4)).toHaveText("2");
+  await expect(rebalance.getByRole("gridcell").nth(6)).toContainText("150");
   await expect(page.getByText("仅用于历史研究")).toBeVisible();
 });
 
@@ -49,7 +51,7 @@ test("daily research candidate action posts without touching the real database",
     if (url.pathname.endsWith("/paper/daily-batches/latest")) return json(route, { item: null });
     return json(route, { items: [] });
   });
-  await page.goto("/next/paper");
+  await page.goto("/");
   await expect(page.getByRole("heading", { level: 1, name: "模拟盘" })).toBeVisible();
   await expect(page.getByText("账户收益对比")).toBeVisible();
   await expect(page.getByText("上证指数").first()).toBeVisible();
@@ -84,7 +86,7 @@ test("paper switches account strategies and creates an isolated account", async 
     if (url.pathname.endsWith("/paper/daily-batches/latest")) return json(route, { item: null });
     return json(route, { items: [] });
   });
-  await page.goto("/next/paper");
+  await page.goto("/");
   await page.locator("#paper-account").selectOption("account-2");
   await expect(page.getByText("multifactor_linear_v1 @ 1.0.0")).toBeVisible();
   await page.getByRole("button", { name: "新建模拟账户" }).click();
@@ -116,8 +118,10 @@ test("paper order review and realtime settlement require explicit clicks", async
     if (url.pathname.endsWith("/paper/daily-batches/latest")) return json(route, { item: null });
     return json(route, { items: [] });
   });
-  await page.goto("/next/paper");
-  await expect(page.getByText("宁德时代 · 300750.SZ")).toBeVisible();
+  await page.goto("/");
+  const order = page.getByRole("row").filter({ hasText: "300750.SZ" });
+  await expect(order).toBeVisible();
+  await expect(order).toContainText("宁德时代");
   expect(reviews).toHaveLength(0);
   expect(settlements).toBe(0);
   await page.getByRole("button", { name: "批准" }).click();
@@ -145,7 +149,7 @@ test("factor release keeps an independent review note and submits approval", asy
     if (url.pathname.endsWith("/factor-lab/releases/latest")) return json(route, { items: [release] });
     return json(route, { items: [] });
   });
-  await page.goto("/next/factor-library");
+  await page.goto("/factor-library");
   await page.getByLabel("审查说明").fill("证据链已复核");
   await page.getByRole("button", { name: "批准进入 Shadow" }).click();
   await expect.poll(() => approval).not.toBeNull();
@@ -164,7 +168,7 @@ test("factor release reject is blocked until a review note is supplied", async (
     if (url.pathname.endsWith("/factor-lab/snapshots/latest") || url.pathname.endsWith("/factor-lab/evaluations/latest") || url.pathname.endsWith("/factor-lab/backtests/latest")) return json(route, { item: null });
     return json(route, { items: [] });
   });
-  await page.goto("/next/factor-library");
+  await page.goto("/factor-library");
   await page.getByRole("button", { name: "拒绝", exact: true }).click();
   await page.waitForTimeout(100);
   expect(rejection).toBeNull();
@@ -185,7 +189,7 @@ test("decision maturity scan only evaluates explicitly selected cases", async ({
     if (url.pathname.endsWith("/decision-cases")) return json(route, { items: [] });
     return json(route, { items: [] });
   });
-  await page.goto("/next/decisions");
+  await page.goto("/decisions");
   await page.getByLabel("选择案例 case-ready").check();
   await page.getByRole("button", { name: "评价所选 1 项" }).click();
   await expect.poll(() => batch).not.toBeNull();
@@ -202,7 +206,7 @@ test("thesis claim confirmation is a deliberate PATCH", async ({ page }) => {
     if (url.pathname.endsWith("/theses")) return json(route, { items: [{ thesis_id: "thesis-1", security_code: "300750.SZ", title: "需求增长", core_claim: "需求持续增长", horizon: "6-12个月", status: "观察", monitor: {} }] });
     return json(route, { items: [] });
   });
-  await page.goto("/next/theses");
+  await page.goto("/theses");
   await page.getByRole("button", { name: "查看详情" }).click();
   await page.getByRole("button", { name: "维持", exact: true }).click();
   await expect.poll(() => verdict).not.toBeNull();
@@ -217,7 +221,7 @@ test("thesis deletion honors cancel and only deletes after confirmation", async 
     if (url.pathname.endsWith("/theses")) return json(route, { items: [{ thesis_id: "thesis-delete", security_code: "300750.SZ", title: "待删除论点", core_claim: "测试删除确认", horizon: "6-12个月", status: "观察", monitor: {} }] });
     return json(route, { items: [] });
   });
-  await page.goto("/next/theses");
+  await page.goto("/theses");
   page.once("dialog", (dialog) => dialog.dismiss());
   await page.getByRole("button", { name: "删除论点" }).click();
   await page.waitForTimeout(100);
@@ -236,7 +240,7 @@ test("company BM25 search renders a clickable source", async ({ page }) => {
     if (url.pathname.includes("/research-runs") || url.pathname.includes("/assistant-history") || url.pathname.includes("/financial-facts")) return json(route, { items: [] });
     return json(route, { items: [] });
   });
-  await page.goto("/next/company");
+  await page.goto("/company");
   await page.getByLabel("全文证据搜索").fill("营业收入");
   await page.getByRole("button", { name: "BM25 搜索" }).click();
   await expect(page.getByText("SEARCH · fts5_bm25")).toBeVisible();

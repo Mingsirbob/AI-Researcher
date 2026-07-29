@@ -51,6 +51,49 @@ FINANCIAL_TEMPLATE_QUESTIONS = (
     "现金分红和股东回报发生了什么变化？",
 )
 
+RETIRED_SPLIT_DOMAIN_TABLES = (
+    "paper_daily_batch_step",
+    "paper_order",
+    "paper_position",
+    "paper_nav_snapshot",
+    "paper_realtime_quote",
+    "paper_benchmark_price",
+    "paper_daily_run",
+    "paper_daily_batch",
+    "paper_account",
+    "paper_strategy",
+    "factor_release_decision",
+    "factor_release_gate",
+    "factor_release_candidate",
+    "factor_backtest_trade",
+    "factor_backtest_rebalance",
+    "factor_backtest_nav",
+    "factor_backtest_run",
+    "factor_evaluation_correlation",
+    "factor_evaluation_metric",
+    "factor_evaluation_period",
+    "factor_evaluation_run",
+    "factor_lab_value",
+    "factor_lab_snapshot",
+    "model_factor_binding",
+    "factor_set_member",
+    "factor_set",
+    "factor_release_review",
+    "factor_version",
+    "factor_definition",
+    "factor_formula_template",
+    "research_candidate",
+    "security_factor_snapshot",
+    "factor_snapshot",
+    "current_shadow_signal",
+    "current_shadow_snapshot",
+    "model_validation_run",
+    "shadow_signal",
+    "prediction_snapshot",
+    "model_artifact",
+    "model_run",
+)
+
 
 def assistant_query_terms(question: str) -> list[str]:
     text = question.strip().lower()
@@ -74,9 +117,16 @@ def normalize_sequence(value: str | None) -> str:
 
 
 class ResearchStore:
-    def __init__(self, db_path: Path, document_root: Path):
+    def __init__(
+        self,
+        db_path: Path,
+        document_root: Path,
+        *,
+        retain_split_domains: bool = False,
+    ):
         self.db_path = db_path
         self.document_root = document_root
+        self.retain_split_domains = retain_split_domains
         self.document_root.mkdir(parents=True, exist_ok=True)
         self.fts_available = False
         self._initialize()
@@ -91,12 +141,91 @@ class ResearchStore:
     def _initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         apply_migration(self.connect, "0001_research_core", self._create_schema)
+        apply_migration(
+            self.connect,
+            "0016_quant_reference_boundary",
+            self._remove_decision_shadow_foreign_key,
+        )
+        if not self.retain_split_domains:
+            apply_migration(
+                self.connect,
+                "0022_retire_split_domain_tables",
+                self._retire_split_domain_tables,
+            )
         with self.connect() as conn:
             try:
                 conn.execute("SELECT 1 FROM document_chunk_fts LIMIT 1")
                 self.fts_available = True
             except sqlite3.OperationalError:
                 self.fts_available = False
+
+    def _retire_split_domain_tables(self) -> None:
+        conn = self.connect()
+        try:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("BEGIN IMMEDIATE")
+            for table in RETIRED_SPLIT_DOMAIN_TABLES:
+                conn.execute(f'DROP TABLE IF EXISTS "{table}"')
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.close()
+
+    def _remove_decision_shadow_foreign_key(self) -> None:
+        with self.connect() as conn:
+            has_external_reference = any(
+                row[2] == "current_shadow_snapshot"
+                for row in conn.execute("PRAGMA foreign_key_list(decision_case)")
+            )
+        if not has_external_reference:
+            return
+
+        conn = self.connect()
+        try:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executescript(
+                """
+                CREATE TABLE decision_case_quant_boundary (
+                    case_id TEXT PRIMARY KEY,
+                    security_code TEXT NOT NULL,
+                    as_of TEXT NOT NULL,
+                    decision_horizon_days INTEGER NOT NULL,
+                    decision_horizon_label TEXT NOT NULL,
+                    benchmark_code TEXT NOT NULL,
+                    benchmark_name TEXT NOT NULL,
+                    policy_version TEXT NOT NULL,
+                    rule_status TEXT NOT NULL,
+                    research_run_id TEXT,
+                    thesis_id TEXT,
+                    shadow_snapshot_id TEXT,
+                    scores_json TEXT NOT NULL,
+                    gates_json TEXT NOT NULL,
+                    risk_boundaries_json TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    snapshot_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (security_code) REFERENCES security_master(security_code),
+                    FOREIGN KEY (research_run_id) REFERENCES research_run(run_id)
+                );
+                INSERT INTO decision_case_quant_boundary
+                SELECT * FROM decision_case;
+                DROP TABLE decision_case;
+                ALTER TABLE decision_case_quant_boundary RENAME TO decision_case;
+                CREATE INDEX idx_decision_case_asof
+                ON decision_case(as_of DESC, created_at DESC);
+                """
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.close()
 
     def _create_schema(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -792,6 +921,17 @@ class ResearchStore:
 
     def stats(self) -> dict:
         with self.connect() as conn:
+            existing = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+
+            def count(table: str, where: str = "") -> int:
+                if table not in existing:
+                    return 0
+                return conn.execute(f"SELECT COUNT(*) FROM {table} {where}").fetchone()[0]
+
             return {
                 "securities": conn.execute("SELECT COUNT(*) FROM security_master").fetchone()[0],
                 "announcements": conn.execute("SELECT COUNT(*) FROM announcement").fetchone()[0],
@@ -819,23 +959,15 @@ class ResearchStore:
                 "research_artifacts": conn.execute(
                     "SELECT COUNT(*) FROM research_artifact"
                 ).fetchone()[0],
-                "factor_snapshots": conn.execute(
-                    "SELECT COUNT(*) FROM factor_snapshot WHERE status='completed'"
-                ).fetchone()[0],
-                "research_candidates": conn.execute(
-                    "SELECT COUNT(*) FROM research_candidate"
-                ).fetchone()[0],
+                "factor_snapshots": count("factor_snapshot", "WHERE status='completed'"),
+                "research_candidates": count("research_candidate"),
                 "evidence_acceptance_runs": conn.execute(
                     "SELECT COUNT(*) FROM evidence_acceptance_run"
                 ).fetchone()[0],
-                "model_runs": conn.execute("SELECT COUNT(*) FROM model_run").fetchone()[0],
-                "shadow_signals": conn.execute("SELECT COUNT(*) FROM shadow_signal").fetchone()[0],
-                "model_validations": conn.execute(
-                    "SELECT COUNT(*) FROM model_validation_run"
-                ).fetchone()[0],
-                "current_shadow_signals": conn.execute(
-                    "SELECT COUNT(*) FROM current_shadow_signal"
-                ).fetchone()[0],
+                "model_runs": count("model_run"),
+                "shadow_signals": count("shadow_signal"),
+                "model_validations": count("model_validation_run"),
+                "current_shadow_signals": count("current_shadow_signal"),
                 "decision_outcomes": conn.execute(
                     "SELECT COUNT(*) FROM decision_outcome"
                 ).fetchone()[0],

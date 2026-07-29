@@ -2,10 +2,11 @@
 
 ## 当前入口
 
-- `/`：当前以 `307` 重定向到 Vue 3 的 `/next/paper`。
-- `/next`：Vue 3 生产构建入口。
+- `/`：Vue 3 生产入口，直接渲染模拟盘，不改变地址栏。
+- `/company`、`/backtest` 等：Vue Router 根级业务路由。
+- `/next/*`：仅保留到对应根级路由的兼容重定向。
 
-FastAPI 继续提供全部 `/api` 接口。Vue 构建产物位于 `frontend/dist`，仅在该目录存在时挂载 `/next/assets`。
+FastAPI 继续提供全部 `/api` 接口。Vue 构建产物位于 `frontend/dist`，仅在该目录存在时挂载 `/assets`。
 
 ## 已迁移范围
 
@@ -28,7 +29,7 @@ P5-B 已完成真实 iFinD/LLM 环境验收。2026-07-29 完成观察门禁收�
 
 ## P5 上线与回滚
 
-Vue 是唯一生产前端。构建存在时，`/` 以 `307` 重定向到 `/next/paper`；构建缺失时根入口返回 503，不使用另一套前端掩盖部署错误。当前状态可通过 `/api/health` 的 `frontend` 字段检查，正常值为 `configured_default=vue`、`active_default=vue`、`vue_built=true`。
+Vue 是唯一生产前端。构建存在时，`/` 直接返回 Vue `index.html`；构建缺失时根入口返回503，不使用另一套前端掩盖部署错误。当前状态可通过 `/api/health` 的 `frontend` 字段检查，正常值为 `configured_default=vue`、`active_default=vue`、`vue_built=true`、`vue_entry=/`。
 
 生产部署必须先执行 `npm ci && npm run build`，再启动或重启 FastAPI。回滚使用上一完整 Git 提交或部署制品，同时恢复与该版本匹配的前后端，不再通过运行时开关切换前端实现。
 
@@ -45,7 +46,7 @@ P5-A 和 P5-B 已在 `codex/vue-p5` 分支完成：入口观察、健康状态�
 - Evidence Acceptance：`f162d3ee-1e34-418a-bb7a-16dbda76ff40`，状态 `passed`，失败指标 0。
 - 决策成熟扫描：`ready=0`、`pending=5`，因此没有执行批量结果评价。
 - 全程没有自动批准或拒绝因子、Thesis Claim 或 Paper 订单，也没有执行模拟成交。
-- 默认入口验收：`/` 返回 `307 -> /next/paper`，`/next/paper` 返回 200；浏览器控制台无错误，页面无横向溢出。
+- 默认入口验收：`/` 直接返回200并渲染模拟盘，根级业务路由返回200；浏览器控制台无错误，页面无横向溢出。
 - 2026-07-29 最终观察期复验：服务由 `C:\Users\13056\anaconda3\envs\quant\python.exe` 在 8000 端口启动，健康状态为 `configured_default=vue`、`active_default=vue`、`vue_built=true`。
 - Vanilla 退役验收：`/legacy` 返回 404，Vue 构建缺失时根入口返回 503，回滚责任转移到完整 Git/部署版本。
 
@@ -70,7 +71,7 @@ P5-A 和 P5-B 已在 `codex/vue-p5` 分支完成：入口观察、健康状态�
 | P3 证据能力 | 增加 FTS5/BM25 搜索及 LIKE 回退，财务事实继续绑定报告期、比较期、文档哈希和页码 |
 | P4 工程化 | 增加 OpenAPI TypeScript 契约、Vitest、Playwright 双视口回归和 GitHub Actions 质量门禁 |
 
-最终验证基线（2026-07-29）：quant 环境 Python `154 passed`、Vue 单元测试 `7 passed`、Playwright `42 passed`，`npm run typecheck` 和 `npm run build` 通过。Playwright 包含桌面和移动路由回归，以及回测指标、Paper 研究候选、多账户创建、订单批准/拒绝与实时撮合、因子发布批准/拒绝、决策批量评价、Thesis Claim 确认与删除确认、公司 BM25 搜索的路由模拟测试；模拟测试不会写入真实数据库。
+最终验证基线（2026-07-29）：quant 环境 Python `154 passed`、Vue 单元测试 `7 passed`、Playwright `44 passed`，`npm run typecheck` 和 `npm run build` 通过。Playwright 包含桌面和移动根级路由回归、旧 `/next` 兼容跳转，以及回测指标、Paper 研究候选、多账户创建、订单批准/拒绝与实时撮合、因子发布批准/拒绝、决策批量评价、Thesis Claim 确认与删除确认、公司 BM25 搜索的路由模拟测试；模拟测试不会写入真实数据库。
 
 ## 本地开发
 
@@ -89,7 +90,7 @@ npm install
 npm run dev
 ```
 
-Vite 使用 `http://127.0.0.1:5173/next/`，并将 `/api` 代理到 `http://127.0.0.1:8000`。
+Vite 使用 `http://127.0.0.1:5173/`，并将 `/api` 代理到 `http://127.0.0.1:8000`。
 
 生产构建：
 
@@ -99,7 +100,7 @@ npm ci
 npm run build
 ```
 
-构建完成后，通过 `http://127.0.0.1:8000/next` 访问 Vue 版本。
+构建完成后，通过 `http://127.0.0.1:8000` 访问 Vue 版本。
 
 针对已由 quant 环境启动在其他端口的服务，可覆盖 Playwright 基址：
 
@@ -114,7 +115,7 @@ npm run test:e2e
 - `npm run test` 必须通过 Vue 单元测试。
 - `npm run test:e2e` 必须通过桌面和移动两个项目。
 - Python 回归测试必须全部通过。
-- 根入口必须重定向到 Vue，10 条 Vue 路由必须返回 200，`/legacy` 必须返回 404。
+- 根入口和10条 Vue 路由必须返回200，`/legacy` 必须返回404；旧 `/next/*` 仅允许重定向到白名单内的新路由。
 - 浏览器不得出现 page error、console error 或静态资源加载失败。
 - 1440px 桌面和 390px 移动视口不得发生页面级横向溢出。
 - 离开页面后，批次轮询和 ResizeObserver 必须被清理。

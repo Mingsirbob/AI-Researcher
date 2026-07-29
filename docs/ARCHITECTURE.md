@@ -156,7 +156,9 @@ flowchart LR
     API --> IFind["iFinD QuantAPI SDK\n日线、简称与公告元数据"]
     API --> Calc["确定性分析引擎"]
     API --> LLM["OpenAI-compatible 模型网关"]
-    API --> StateDB["研究状态 SQLite\n主数据、公告、文档、财务事实、快照、Thesis"]
+    API --> StateDB["研究状态 SQLite\n主数据、公告、文档、决策、Thesis、运行审计"]
+    API --> QuantDB["量化研究 SQLite\n因子、模型、Shadow、评价、回测、发布"]
+    API --> PaperDB["模拟盘 SQLite\n账户、策略、批次、订单、持仓、净值、行情缓存"]
     IFind --> Archive["公告 PDF 归档与解析"]
     Archive --> StateDB
 
@@ -167,6 +169,25 @@ flowchart LR
     Evidence --> Report
     Report --> UI
 ```
+
+### 5.1 状态数据库边界
+
+`data/research_state.db` 是研究事实与审计库，持有证券主数据、公告、财务事实、研究产物、
+决策、Thesis 和 `runtime_*` / iFinD 调用事件。`data/quant_research.db` 持有因子、模型、
+Shadow、因子评价、回测和发布数据。`data/paper_trading.db` 是模拟交易域库，持有
+`paper_strategy`、`paper_account`、`paper_daily_run`、`paper_order`、
+`paper_position`、`paper_nav_snapshot`、实时行情、基准行情和每日批次表。
+
+模拟盘读取证券名称和行业时，先从模拟盘库读取持仓或订单，再批量查询研究库的
+`security_master`，不执行跨数据库 JOIN。迁移 `0014` 和 `0015` 首次启动时从旧研究库
+复制历史数据；迁移完成后模拟盘写入只进入新库。每个数据库独立维护
+`schema_migration` 日志。
+
+量化库保留一张启动时从研究库批量 UPSERT 的 `security_master` 只读投影，用于高频列表
+查询和本地 JOIN；研究库仍是证券主数据唯一事实来源。决策案例只保存 Shadow 快照 ID，
+由 `QuantStore` 在服务边界验证，不建立跨 SQLite 文件外键。量化迁移 `0017` 至 `0021`
+按核心、因子实验、评价、回测和发布顺序复制。正式模式由 `0022` 删除研究库中的
+旧模拟盘和量化表，不提供运行时旧库回退；灾难恢复使用迁移前备份。
 
 ## 6. 运行时组件
 
@@ -413,7 +434,7 @@ updated_at
 
 ### 6.8 前端工作台
 
-入口：`frontend/src/main.ts`、`frontend/src/App.vue`、`frontend/src/router/index.ts`；生产构建输出到 `frontend/dist`，由 FastAPI 通过 `/next` 提供。
+入口：`frontend/src/main.ts`、`frontend/src/App.vue`、`frontend/src/router/index.ts`；生产构建输出到 `frontend/dist`，由 FastAPI 在站点根路径提供，API 保留 `/api` 前缀。
 
 当前功能：
 

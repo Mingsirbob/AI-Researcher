@@ -1,8 +1,8 @@
 import { createRouter, createWebHistory } from "vue-router";
 
 const routes = [
-  { path: "/", redirect: "/paper" },
-  { path: "/paper", name: "paper", component: () => import("@/features/paper/PaperView.vue"), meta: { title: "模拟盘", group: "daily" } },
+  { path: "/", name: "paper", component: () => import("@/features/paper/PaperView.vue"), meta: { title: "模拟盘", group: "daily" } },
+  { path: "/paper", redirect: "/" },
   { path: "/company", name: "company", component: () => import("@/features/company/CompanyView.vue"), meta: { title: "公司分析", group: "company" } },
   { path: "/theses", name: "theses", component: () => import("@/features/company/ThesisView.vue"), meta: { title: "长期论点", group: "company" } },
   { path: "/quant", name: "quant", component: () => import("@/features/lab/QuantView.vue"), meta: { title: "数据与特征", group: "lab" } },
@@ -15,7 +15,7 @@ const routes = [
 ];
 
 const router = createRouter({
-  history: createWebHistory("/next/"),
+  history: createWebHistory("/"),
   routes,
   scrollBehavior: () => ({ top: 0 }),
 });

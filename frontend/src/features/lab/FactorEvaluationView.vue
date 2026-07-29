@@ -8,6 +8,7 @@ import { useUiStore } from "@/stores/ui";
 import PageHeader from "@/components/PageHeader.vue";
 import MetricStrip from "@/components/MetricStrip.vue";
 import AsyncState from "@/components/AsyncState.vue";
+import FactorAnalytics from "@/components/FactorAnalytics.vue";
 
 interface FactorMetric {
   factor_id: string;
@@ -63,8 +64,7 @@ const correlations = computed(() => (data.value?.correlations || [])
   .sort((left, right) => Math.abs(right.mean_rank_correlation) - Math.abs(left.mean_rank_correlation)));
 const strongestCorrelation = computed(() => correlations.value[0]);
 const strongestOther = computed(() => strongestCorrelation.value ? otherFactorName(strongestCorrelation.value) : "没有其他可比因子");
-const layerEntries = computed(() => Object.entries(primary.value?.layer_returns || {}));
-const maxLayerAbs = computed(() => Math.max(...layerEntries.value.map(([, value]) => Math.abs(Number(value))), 0.000001));
+const correlationChartData = computed(() => correlations.value.map((item) => ({ name: otherFactorName(item), value: item.mean_rank_correlation })));
 const summary = computed(() => [
   { label: `${primary.value?.horizon || 20}日 Rank IC`, value: number(primary.value?.mean_rank_ic, 4), note: `${primary.value?.observation_count || "—"} 个评价截面` },
   { label: `${primary.value?.horizon || 20}日 ICIR`, value: number(primary.value?.rank_icir, 3), note: "年化，采样间隔已校正" },
@@ -103,20 +103,9 @@ const run = useMutation({
     <MetricStrip :items="summary" />
 
     <section class="content-band white">
-      <div class="evaluation-detail-layout">
-        <section>
-          <div class="section-heading"><div><span>IC DECAY</span><b>{{ selectedOption?.factor_name }}周期衰减</b></div><small>{{ shortId(data?.run?.evaluation_id) }}</small></div>
-          <div class="data-table-wrap"><table class="data-table"><thead><tr><th>预测周期</th><th>Rank IC</th><th>ICIR</th><th>正 IC 占比</th><th>Top 换手</th><th>样本</th></tr></thead><tbody><tr v-for="item in selectedMetrics" :key="item.horizon"><td><b>{{ item.horizon }} 日</b></td><td>{{ number(item.mean_rank_ic, 4) }}</td><td>{{ number(item.rank_icir, 3) }}</td><td>{{ pct(item.positive_ic_ratio) }}</td><td>{{ pct(item.top_layer_turnover) }}</td><td>{{ item.observation_count }} × {{ Math.round(item.average_security_count) }}</td></tr></tbody></table></div>
-        </section>
-        <section>
-          <div class="section-heading"><div><span>LAYER RETURN</span><b>{{ primary?.horizon || 20 }}日五分层平均收益</b></div></div>
-          <div class="layer-return-list"><div v-for="([layer, value]) in layerEntries" :key="layer" class="layer-return-row"><span>第{{ layer }}层</span><div><i :class="{ negative: Number(value) < 0 }" :style="{ width: `${Math.max(2, Math.abs(Number(value)) / maxLayerAbs * 100)}%` }"></i></div><b>{{ pct(value) }}</b></div></div>
-        </section>
-        <section>
-          <div class="section-heading"><div><span>CORRELATION</span><b>与其他因子的相关性</b></div></div>
-          <div class="correlation-list"><div v-for="item in correlations.slice(0, 10)" :key="`${item.left_factor_id}-${item.right_factor_id}`"><span>{{ otherFactorName(item) }}</span><b>{{ number(item.mean_rank_correlation, 3) }}</b></div><p v-if="!correlations.length" class="muted">没有其他因子的共同截面。</p></div>
-        </section>
-      </div>
+      <div class="section-heading"><div><span>FACTOR ANALYTICS</span><b>{{ selectedOption?.factor_name }} · 多周期与横截面诊断</b></div><small>{{ shortId(data?.run?.evaluation_id) }}</small></div>
+      <FactorAnalytics :metrics="selectedMetrics" :primary="primary" :correlations="correlationChartData" />
+      <div class="data-table-wrap" style="margin-top:20px"><table class="data-table"><thead><tr><th>预测周期</th><th>Rank IC</th><th>ICIR</th><th>正 IC 占比</th><th>Top 换手</th><th>样本</th></tr></thead><tbody><tr v-for="item in selectedMetrics" :key="item.horizon"><td><b>{{ item.horizon }} 日</b></td><td>{{ number(item.mean_rank_ic, 4) }}</td><td>{{ number(item.rank_icir, 3) }}</td><td>{{ pct(item.positive_ic_ratio) }}</td><td>{{ pct(item.top_layer_turnover) }}</td><td>{{ item.observation_count }} × {{ Math.round(item.average_security_count) }}</td></tr></tbody></table></div>
       <div class="evaluation-contract-line"><span>有效区间 <b>{{ data?.run?.effective_start_date }} → {{ data?.run?.effective_end_date }}</b></span><span>股票池 <b>{{ data?.run?.universe }}</b></span><span>结果哈希 <code>{{ shortId(data?.run?.result_hash) }}</code></span></div>
     </section>
   </AsyncState>

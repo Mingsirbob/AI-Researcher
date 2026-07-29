@@ -53,7 +53,9 @@ def test_prepare_shadow_signals_rejects_index_mismatch():
 
 
 def test_model_run_registration_is_immutable_and_queryable(tmp_path):
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    store = ResearchStore(
+        tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True
+    )
     imported_at = datetime.now(timezone.utc).isoformat()
     model = {
         "model_run_id": "run-1",

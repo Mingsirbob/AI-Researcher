@@ -3,6 +3,8 @@ import { RefreshCw } from "lucide-vue-next";
 import MultiLineChart from "@/components/MultiLineChart.vue";
 import type { ChartSeries } from "@/api/types";
 import { pct } from "@/lib/format";
+import ResearchDataGrid from "@/components/ResearchDataGrid.vue";
+import type { ColDef } from "ag-grid-community";
 
 interface ComparisonState {
   as_of?: string;
@@ -21,6 +23,14 @@ defineProps<{
   refreshing: boolean;
 }>();
 defineEmits<{ refresh: [] }>();
+const columns: ColDef[] = [
+  { field: "name", headerName: "对比对象", pinned: "left", width: 140, minWidth: 120 },
+  { field: "code", headerName: "代码", width: 112, minWidth: 105 },
+  { field: "latest_return", headerName: "累计收益", filter: "agNumberColumnFilter", valueFormatter: ({ value }) => pct(value), width: 105, minWidth: 96 },
+  { field: "excess_return", headerName: "账户超额", filter: "agNumberColumnFilter", valueFormatter: ({ value, data }) => data?.code === "portfolio" ? "—" : pct(value), width: 105, minWidth: 96 },
+  { field: "coverage", headerName: "覆盖率", valueFormatter: ({ value, data }) => data?.code === "portfolio" ? "—" : pct(value), width: 92, minWidth: 84 },
+  { field: "status", headerName: "状态", filter: true, width: 94, minWidth: 86 },
+];
 </script>
 
 <template>
@@ -29,7 +39,7 @@ defineEmits<{ refresh: [] }>();
     <p v-if="realtimeError" class="realtime-warning">自动更新暂不可用：{{ realtimeError }}</p>
     <div v-if="rows.length" class="comparison-strip"><div v-for="item in rows" :key="item.code"><span>{{ item.name }}</span><b>{{ pct(item.latest_return) }}</b><small>{{ item.code === 'portfolio' ? '账户累计收益' : `相对账户 ${pct(item.excess_return)}` }}</small></div></div>
     <MultiLineChart :series="series" value-label="账户与指数累计净值对比" />
-    <div class="data-table-wrap comparison-table"><table class="data-table"><thead><tr><th>对比对象</th><th>累计收益</th><th>账户超额</th><th>覆盖率</th><th>状态</th></tr></thead><tbody><tr v-for="item in rows" :key="item.code"><td><b>{{ item.name }}</b><br><small>{{ item.code === 'portfolio' ? accountId : item.code }}</small></td><td>{{ pct(item.latest_return) }}</td><td>{{ item.code === 'portfolio' ? '—' : pct(item.excess_return) }}</td><td>{{ item.code === 'portfolio' ? '—' : pct(item.coverage) }}</td><td><span :class="['status',item.status==='complete'||item.status==='live'?'':item.status==='partial'?'warn':'fail']">{{ item.status }}</span></td></tr><tr v-if="!rows.length"><td colspan="5">{{ comparison?.limitations?.join('；')||'暂无账户收益对比数据' }}</td></tr></tbody></table></div>
+    <div class="comparison-grid"><ResearchDataGrid :rows="rows" :columns="columns" row-id="code" :height="310" :empty-text="comparison?.limitations?.join('；') || '暂无账户收益对比数据'" /></div>
     <p v-if="comparison?.limitations?.length" class="comparison-note">{{ comparison.limitations.join('；') }}</p>
   </section>
 </template>
@@ -49,7 +59,7 @@ defineEmits<{ refresh: [] }>();
 .comparison-strip span { font-size: 9px; }
 .comparison-strip b { margin: 6px 0 4px; font-size: 18px; }
 .comparison-strip small { font-size: 8px; }
-.comparison-table { margin: 16px -22px 0; }
+.comparison-grid { margin: 16px -22px 0; }
 .comparison-note { margin: 0 -22px; padding: 10px 22px; color: var(--muted); border-top: 1px solid var(--line); font-size: 9px; }
 @media (max-width: 900px) { .comparison-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } .comparison-strip > div { border-bottom: 1px solid var(--line); } }
 @media (max-width: 560px) { .performance-actions { align-items: flex-end; flex-direction: column; gap: 6px; } .comparison-strip { grid-template-columns: 1fr; } .comparison-strip > div { border-right: 0; } }

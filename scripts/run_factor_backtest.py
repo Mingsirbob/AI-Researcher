@@ -16,6 +16,7 @@ from app.factor_backtest import FactorBacktestService
 from app.factor_evaluation import FactorEvaluationService
 from app.factor_lab import FactorLabService
 from app.research_store import ResearchStore
+from app.quant_store import QuantStore
 
 
 def main() -> None:
@@ -34,7 +35,8 @@ def main() -> None:
     args = parser.parse_args()
 
     repository = StockRepository(settings.stock_qfq_db)
-    store = ResearchStore(settings.state_db, settings.document_root)
+    research_store = ResearchStore(settings.state_db, settings.document_root)
+    store = QuantStore(settings.quant_db, research_store)
     factor_lab = FactorLabService(
         store, repository, adjustment="CPS:2", universe="CSI300 current"
     )

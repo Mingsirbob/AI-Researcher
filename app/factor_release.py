@@ -10,6 +10,11 @@ from .research_store import ResearchStore, utc_now
 
 
 FACTOR_RELEASE_GATE_VERSION = "factor-release-gate-v1"
+FACTOR_RELEASE_TABLES = (
+    "factor_release_candidate",
+    "factor_release_gate",
+    "factor_release_decision",
+)
 
 
 def _json(value: Any) -> str:
@@ -31,6 +36,10 @@ class FactorReleaseService:
     def __init__(self, store: ResearchStore):
         self.store = store
         apply_migration(store.connect, "0012_factor_release", self._create_schema)
+        if hasattr(store, "migrate_legacy"):
+            store.migrate_legacy(
+                "0021_split_factor_release_database", FACTOR_RELEASE_TABLES
+            )
 
     def _create_schema(self) -> None:
         with self.store.connect() as conn:

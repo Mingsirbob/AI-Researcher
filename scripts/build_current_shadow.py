@@ -21,6 +21,7 @@ from app.current_shadow import (
     validate_current_data,
 )
 from app.research_store import ResearchStore
+from app.quant_store import QuantStore
 from app.updater import IFindDailyClient
 from app.updater import code_to_table
 
@@ -82,7 +83,8 @@ def main() -> int:
     args = parse_args()
     if args.lookback_days < 120 or args.batch_size < 1:
         raise ValueError("lookback-days 至少为 120，batch-size 必须大于 0")
-    store = ResearchStore(settings.state_db, settings.document_root)
+    research_store = ResearchStore(settings.state_db, settings.document_root)
+    store = QuantStore(settings.quant_db, research_store)
     latest = store.latest_model_run()
     run_id = args.run_id or (latest or {}).get("model_run_id")
     if not run_id:
@@ -148,7 +150,10 @@ def main() -> int:
         )
         return 0 if contract["status"] == "passed" else 2
     for item in universe.itertuples(index=False):
-        store.upsert_security_name(item.security_code, item.security_name, source="iFinD_WCQuery")
+        research_store.upsert_security_name(
+            item.security_code, item.security_name, source="iFinD_WCQuery"
+        )
+    store.sync_security_projection()
     snapshot = pipeline.predict(
         model=model,
         validation=validation,

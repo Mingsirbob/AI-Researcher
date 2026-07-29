@@ -39,9 +39,15 @@ DEFAULT_MAX_PAIR_CORRELATION = 0.85
 class PortfolioDecisionService:
     """Builds deterministic portfolio plans without mutating paper account state."""
 
-    def __init__(self, repository: StockRepository, store: ResearchStore) -> None:
+    def __init__(
+        self,
+        repository: StockRepository,
+        store: ResearchStore,
+        research_store: ResearchStore | None = None,
+    ) -> None:
         self.repository = repository
         self.store = store
+        self.research_store = research_store or store
 
     def sources(self, as_of: str) -> tuple[dict, dict]:
         date.fromisoformat(as_of)
@@ -261,7 +267,7 @@ class PortfolioDecisionService:
                 {"name": "drawdown", "passed": float(factor.get("max_drawdown_250d") or -1) >= -MAX_DRAWDOWN_250D_ABS, "observed": factor.get("max_drawdown_250d"), "expected": f">= {-MAX_DRAWDOWN_250D_ABS}"},
                 {"name": "tradability", "passed": tradability["passed"], "observed": tradability.get("reason") or "tradable", "expected": "positive OHLC and volume on as_of"},
             ]
-            artifact = self.store.latest_research_assessment(code, as_of)
+            artifact = self.research_store.latest_research_assessment(code, as_of)
             assessment = artifact["payload"] if artifact else None
             assessment_valid = bool(
                 artifact

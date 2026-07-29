@@ -4,6 +4,7 @@ import pytest
 
 from app.decision_cases import DecisionCaseService
 from app.research_store import ResearchStore
+from app.quant_store import QuantStore
 from app.schemas import ThesisCreate
 from app.state import ThesisStore
 
@@ -13,7 +14,9 @@ CODE = "300750.SZ"
 
 
 def build_service(tmp_path, *, liquidity=1_500_000_000.0):
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    store = ResearchStore(
+        tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True
+    )
     theses = ThesisStore(tmp_path / "state.db")
     store.upsert_security_name(CODE, "宁德时代", "test")
 
@@ -231,6 +234,21 @@ def test_decision_case_is_immutable_idempotent_and_keeps_three_scores(tmp_path):
     assert first["scores"]["evidence_confidence"]["score"] == 100
     assert first["snapshot"]["source_refs"]["research_run_id"] == run_id
     assert store.list_decision_cases()[0]["snapshot_hash"] == first["snapshot_hash"]
+
+
+def test_decision_case_reads_shadow_from_separate_quant_database(tmp_path):
+    store, theses, _, run_id, thesis_id = build_service(tmp_path)
+    quant_store = QuantStore(tmp_path / "quant_research.db", store)
+    service = DecisionCaseService(store, theses, quant_store)
+
+    case = create_case(service, run_id, thesis_id)
+
+    assert case["rule_status"] == "eligible_for_review"
+    assert case["shadow_snapshot_id"] == "current-shadow-1"
+    with store.connect() as conn:
+        assert "current_shadow_snapshot" not in {
+            row[2] for row in conn.execute("PRAGMA foreign_key_list(decision_case)")
+        }
 
 
 def test_human_approval_is_append_only_and_only_allows_tracking(tmp_path):

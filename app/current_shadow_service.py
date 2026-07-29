@@ -13,9 +13,15 @@ from .updater import IFindDailyClient, code_to_table
 
 
 class CurrentShadowService:
-    def __init__(self, settings: Settings, store: ResearchStore):
+    def __init__(
+        self,
+        settings: Settings,
+        store: ResearchStore,
+        master_store: ResearchStore | None = None,
+    ):
         self.settings = settings
         self.store = store
+        self.master_store = master_store or store
         self.pipeline = CurrentShadowPipeline(store, settings.current_shadow_root / "providers")
         self._lock = threading.Lock()
 
@@ -98,9 +104,11 @@ class CurrentShadowService:
                 raw_frame = pd.concat([raw_frame, *missing_frames], ignore_index=True)
             frame, alignment = align_forward_adjusted_fields(frame, raw_frame)
             for item in universe.itertuples(index=False):
-                self.store.upsert_security_name(
+                self.master_store.upsert_security_name(
                     item.security_code, item.security_name, source="iFinD_WCQuery"
                 )
+            if hasattr(self.store, "sync_security_projection"):
+                self.store.sync_security_projection()
             snapshot = self.pipeline.predict(
                 model=model,
                 validation=validation,
