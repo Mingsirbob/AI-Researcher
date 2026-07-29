@@ -3,9 +3,9 @@ from datetime import date, timedelta
 
 import pytest
 
-from app.data_access import StockRepository
-from app.factor_lab import FactorLabService, evaluate_template
-from app.research_store import ResearchStore
+from app.market.repository import StockRepository
+from app.quant.factor_lab import FactorLabService, evaluate_template
+from app.research.store import ResearchStore
 
 
 def create_price_db(path):

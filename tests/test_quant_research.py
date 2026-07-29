@@ -1,6 +1,6 @@
 import sqlite3
 
-from app.quant_research import neutralize_factor, universe_membership
+from app.quant.research import neutralize_factor, universe_membership
 
 
 def test_neutralize_factor_removes_industry_and_size_exposure():

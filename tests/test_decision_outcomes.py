@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 
-from app.decision_outcomes import DecisionOutcomeService
+from app.decision.outcomes import DecisionOutcomeService
 from tests.test_decision_cases import build_service, create_case
 
 

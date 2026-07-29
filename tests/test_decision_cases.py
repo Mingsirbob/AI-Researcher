@@ -2,11 +2,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.decision_cases import DecisionCaseService
-from app.research_store import ResearchStore
-from app.quant_store import QuantStore
+from app.decision.cases import DecisionCaseService
+from app.research.store import ResearchStore
+from app.quant.store import QuantStore
 from app.schemas import ThesisCreate
-from app.state import ThesisStore
+from app.thesis.store import ThesisStore
 
 
 AS_OF = "2026-07-20"

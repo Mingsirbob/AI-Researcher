@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from app.config import Settings
-from app.updater import (
+from app.core.config import Settings
+from app.market.updater import (
     IFindDailyClient,
     StockDataUpdater,
     default_end_date,

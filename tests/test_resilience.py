@@ -1,7 +1,7 @@
 import threading
 import time
 
-from app.resilience import (
+from app.core.resilience import (
     CallInProgressError,
     CallTimeoutError,
     CircuitBreaker,

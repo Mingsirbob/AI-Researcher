@@ -3,14 +3,14 @@ from datetime import date, timedelta
 
 import pytest
 
-from app.data_access import StockRepository
-from app.analysis import analyze_stock
-from app.llm import deterministic_report
-from app.monitoring import build_monitor_evaluations, run_artifacts
+from app.market.repository import StockRepository
+from app.research.analysis import analyze_stock
+from app.integrations.llm import deterministic_report
+from app.thesis.monitoring import build_monitor_evaluations, run_artifacts
 from app.quant import FactorSnapshotService, compute_security_factors
-from app.research_store import ResearchStore
-from app.quant_store import QuantStore
-from app.research_workflow import (
+from app.research.store import ResearchStore
+from app.quant.store import QuantStore
+from app.research.workflow import (
     COMPANY_SNAPSHOT_SCHEMA_VERSION,
     EVIDENCE_PACK_SCHEMA_VERSION,
     QUANT_CONTEXT_SCHEMA_VERSION,
@@ -19,7 +19,7 @@ from app.research_workflow import (
     build_evidence_pack,
 )
 from app.schemas import ThesisCreate
-from app.state import ThesisStore
+from app.thesis.store import ThesisStore
 
 
 def price_rows(count=300, *, end=date(2026, 7, 20), daily_growth=0.001):

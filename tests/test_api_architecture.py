@@ -1,6 +1,7 @@
 import hashlib
 import json
 
+import app.main as main_module
 from app.api.routers.registry import DOMAIN_MODULES
 from app.container import AppContainer
 from app.main import app, domain_routers
@@ -26,6 +27,7 @@ def test_every_route_is_owned_by_exactly_one_domain_router():
     assert len(registered) == len({id(route) for route in registered})
     assert set(domain_routers) == {name for name, _ in DOMAIN_MODULES}
     assert all(domain_routers[name].routes for name, _ in DOMAIN_MODULES)
+    assert all(route.endpoint.__name__ not in vars(main_module) for route in registered)
 
 
 def test_application_exposes_container_through_fastapi_state():

@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
-import app.current_shadow as current_shadow_module
+import app.quant.current_shadow as current_shadow_module
 
-from app.current_shadow import (
+from app.quant.current_shadow import (
     align_forward_adjusted_fields,
     code_to_qlib_instrument,
     current_signal_rows,

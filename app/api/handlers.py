@@ -90,7 +90,7 @@ from app.thesis.store import ThesisStore
 from ..container import container
 
 
-# Compatibility aliases remain until the domain implementation modules move in P3-P7.
+# Shared service instances used by the route handlers below.
 repo = container.repo
 thesis_store = container.thesis_store
 ifind_service = container.ifind_service

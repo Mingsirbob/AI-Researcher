@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.factor_release import FactorReleaseService
+from app.quant.factor_release import FactorReleaseService
 from tests.test_factor_backtest import create_services
 
 

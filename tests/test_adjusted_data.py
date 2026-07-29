@@ -3,8 +3,8 @@ from datetime import date
 
 import pandas as pd
 
-from app.adjusted_data import AdjustedStockDataBuilder, partition_confirmed_market_jumps
-from app.updater import QualityIssue, normalize_daily_frame
+from app.market.adjusted_data import AdjustedStockDataBuilder, partition_confirmed_market_jumps
+from app.market.updater import QualityIssue, normalize_daily_frame
 
 
 def create_source_db(path):

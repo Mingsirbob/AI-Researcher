@@ -3,15 +3,15 @@ import json
 
 import httpx
 
-from app.config import Settings
-from app.llm import (
+from app.core.config import Settings
+from app.integrations.llm import (
     LLMRuntime,
     generate_ai_report,
     generate_document_answer,
     generate_financial_change_template,
     generate_research_assessment_draft,
 )
-from app.runtime_events import RunContext, RuntimeEventStore, bind_run_context
+from app.core.runtime_events import RunContext, RuntimeEventStore, bind_run_context
 
 
 def analysis_fixture():

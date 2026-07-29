@@ -10,10 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.config import settings
-from app.model_registry import QlibMLflowImporter
-from app.research_store import ResearchStore
-from app.quant_store import QuantStore
+from app.core.config import settings
+from app.quant.model_registry import QlibMLflowImporter
+from app.research.store import ResearchStore
+from app.quant.store import QuantStore
 
 
 def main() -> int:

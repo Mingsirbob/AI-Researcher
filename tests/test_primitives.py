@@ -5,7 +5,7 @@ import statistics
 
 import pytest
 
-from app.primitives import (
+from app.core.primitives import (
     annualized_volatility,
     canonical_hash,
     code_to_qlib_instrument,

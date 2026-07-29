@@ -1,6 +1,6 @@
 from time import monotonic
 
-from app.observability import IFindCallObserver, classify_ifind_error
+from app.core.observability import IFindCallObserver, classify_ifind_error
 
 
 def test_ifind_observer_persists_metrics_and_redacts_secrets(tmp_path):

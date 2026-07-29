@@ -1,5 +1,5 @@
-from app.analysis import analyze_stock
-from app.data_access import normalize_code
+from app.research.analysis import analyze_stock
+from app.market.repository import normalize_code
 
 
 def _rows(count: int = 300) -> list[dict]:

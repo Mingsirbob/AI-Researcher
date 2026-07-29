@@ -1,11 +1,11 @@
 import sqlite3
 from datetime import date, timedelta
 
-from app.data_access import StockRepository
-from app.factor_backtest import FactorBacktestService
-from app.factor_evaluation import FactorEvaluationService
-from app.factor_lab import FactorLabService
-from app.research_store import ResearchStore
+from app.market.repository import StockRepository
+from app.quant.factor_backtest import FactorBacktestService
+from app.quant.factor_evaluation import FactorEvaluationService
+from app.quant.factor_lab import FactorLabService
+from app.research.store import ResearchStore
 
 
 def create_price_db(path):

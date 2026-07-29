@@ -1,18 +1,18 @@
 import sqlite3
 
-from app.data_access import StockRepository
-from app.daily_batch import DailyBatchStore
-from app.factor_lab import FactorLabService
-from app.factor_evaluation import FactorEvaluationService
-from app.factor_backtest import FactorBacktestService
-from app.factor_release import FactorReleaseService
-from app.migrations import applied_migrations, apply_migration
-from app.observability import IFindCallObserver
-from app.paper_trading import PaperExecutionService
-from app.research_store import RETIRED_SPLIT_DOMAIN_TABLES, ResearchStore
-from app.runtime_events import RuntimeEventStore
-from app.sqlite_store import SQLiteStore
-from app.state import ThesisStore
+from app.market.repository import StockRepository
+from app.workflows.daily_batch import DailyBatchStore
+from app.quant.factor_lab import FactorLabService
+from app.quant.factor_evaluation import FactorEvaluationService
+from app.quant.factor_backtest import FactorBacktestService
+from app.quant.factor_release import FactorReleaseService
+from app.core.migrations import applied_migrations, apply_migration
+from app.core.observability import IFindCallObserver
+from app.paper.service import PaperExecutionService
+from app.research.store import RETIRED_SPLIT_DOMAIN_TABLES, ResearchStore
+from app.core.runtime_events import RuntimeEventStore
+from app.core.sqlite_store import SQLiteStore
+from app.thesis.store import ThesisStore
 
 def test_shared_migration_journal_contains_all_schema_entries(tmp_path):
     state_db = tmp_path / "state.db"

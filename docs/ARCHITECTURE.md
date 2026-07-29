@@ -201,7 +201,7 @@ Shadow、因子评价、回测和发布数据。`data/paper_trading.db` 是模�
 - 暴露健康检查、股票分析、外部上下文、研究报告和 Thesis API；
 - 将同步 iFinD SDK 调用放入线程池，避免直接阻塞异步事件循环；
 - 将 HTTP 请求转换为业务服务调用，并把领域异常映射为稳定的 HTTP 状态；
-- 统一公司研究由 `app/company_research.py` 的 `CompanyResearchService` 编排，API、模拟盘候选研究和每日批次共用同一业务入口，不再互相调用路由函数。
+- 统一公司研究由 `app/research/company.py` 的 `CompanyResearchService` 编排，API、模拟盘候选研究和每日批次共用同一业务入口，不再互相调用路由函数。
 
 当前 API：
 
@@ -242,7 +242,7 @@ Shadow、因子评价、回测和发布数据。`data/paper_trading.db` 是模�
 
 ### 6.2 本地行情访问层
 
-入口：`app/data_access.py`
+入口：`app/market/repository.py`
 
 数据源：`data/stock_data.db`
 
@@ -273,7 +273,7 @@ Shadow、因子评价、回测和发布数据。`data/paper_trading.db` 是模�
 
 ### 6.3 确定性分析层
 
-入口：`app/analysis.py`、`app/quant.py`；公共基础实现位于 `app/primitives.py`。
+入口：`app/research/analysis.py`、`app/quant/factors.py`；公共基础实现位于 `app/core/primitives.py`。
 
 `primitives.py` 是以下基础契约的唯一实现：周期收益、年化波动率、最大回撤、
 规范化 JSON 与 SHA-256、A 股代码/行情表名/Qlib instrument 转换。研究页允许在
@@ -309,7 +309,7 @@ Evidence 包含：标识、类别、标签、值、截止时间、来源和计�
 
 ### 6.4 iFinD 适配层
 
-入口：`app/ifind.py`
+入口：`app/integrations/ifind.py`
 
 依赖方式：在 `quant` 环境使用方法二安装 `iFinDAPI==0.0.8`，应用直接 `import iFinDPy`，不再跨 conda 环境加载。
 
@@ -343,11 +343,11 @@ IFIND_PASSWORD=...
 - 公告归档只下载同步范围内符合条件的有限数量文档，不代表公告正文全量覆盖；
 - Codex 受限沙箱中 SDK 登录可能失败，普通本机终端运行正常。
 
-公告证据处理由 `app/announcement_pipeline.py`、`app/document_pipeline.py` 和 `app/research_store.py` 完成：公告元数据增量写入研究状态库，PDF 按 SHA-256 存储并保留版本，文本按页解析和切块；无有效文本层或疑似乱码的文件进入 `ocr_required`，不会静默进入问答。
+公告证据处理由 `app/research/announcements.py`、`app/research/documents.py` 和 `app/research/store.py` 完成：公告元数据增量写入研究状态库，PDF 按 SHA-256 存储并保留版本，文本按页解析和切块；无有效文本层或疑似乱码的文件进入 `ocr_required`，不会静默进入问答。
 
 ### 6.5 LLM 网关与报告层
 
-入口：`app/llm.py`、`app/schemas.py`
+入口：`app/integrations/llm.py`、`app/schemas.py`
 
 当前模型接口为 OpenAI-compatible `/chat/completions`。模型只接收已经生成的结构化分析对象。
 
@@ -371,7 +371,7 @@ IFIND_PASSWORD=...
 
 ### 6.6 Thesis 状态层
 
-入口：`app/state.py`
+入口：`app/thesis/store.py`
 
 数据源：`data/research_state.db`
 
@@ -410,7 +410,7 @@ updated_at
 
 ### 6.7 横截面量化层
 
-入口：`app/quant.py`、`app/data_access.py`、`app/research_store.py`
+入口：`app/quant/factors.py`、`app/market/repository.py`、`app/research/store.py`
 
 运行方式：用户手工触发。`StockRepository.iter_histories()` 复用一个只读 SQLite 连接，逐表读取截止日以前最近 320 条记录；因子服务在内存中计算约 4,897 行结果，再由状态库事务批量保存。因子版本为 `price-liquidity-v1`。
 
@@ -1169,11 +1169,11 @@ SSE 留在 M10.3。
 
 ### 20.1 模拟盘职责拆分
 
-- `app/portfolio_decision.py` 的 `PortfolioDecisionService` 是组合决策的唯一入口：校验因子与 Current Shadow、执行证券硬门禁和 ResearchAssessment 校验、复核持仓、实施行业/相关性约束、计算目标权重并生成订单意图；
+- `app/decision/portfolio.py` 的 `PortfolioDecisionService` 是组合决策的唯一入口：校验因子与 Current Shadow、执行证券硬门禁和 ResearchAssessment 校验、复核持仓、实施行业/相关性约束、计算目标权重并生成订单意图；
 - `paper_strategy` 保存不可变策略标识、版本、信号来源和默认风险参数；`paper_account.strategy_id` 将账户绑定到策略合同。当前提供 Current Shadow LightGBM 排名和线性多因子排名，两者共享同一组合、审批与执行引擎；
 - Vue Paper 工作区通过 `/api/paper/accounts` 和 `/api/paper/strategies` 创建、切换账户，所有研究、批次、行情和撮合命令显式携带当前 `account_id`；
 - 组合决策只返回确定性计划，不写入 `paper_account`、`paper_daily_run`、`paper_order`、`paper_position`、实时行情或净值表；
-- `app/paper_trading.py` 的 `PaperExecutionService` 负责账户状态、计划持久化、人工审批、模拟撮合、持仓、实时点时行情和 NAV；
+- `app/paper/service.py` 的 `PaperExecutionService` 负责账户状态、计划持久化、人工审批、模拟撮合、持仓、实时点时行情和 NAV；
 - 原 `PaperTradingService` 保留为兼容门面，现有 API 和脚本无须改名；旧的重复组合决策代码已删除，策略版本、门禁、仓位算法、快照哈希和成交规则不变。
 
 调用关系固定为：
@@ -1190,7 +1190,7 @@ flowchart LR
 
 ### 20.2 统一状态库迁移入口
 
-- `app/migrations.py` 提供共享 `apply_migration()` 和 `schema_migration` 日志；
+- `app/core/migrations.py` 提供共享 `apply_migration()` 和 `schema_migration` 日志；
 - 研究核心、Thesis、模拟盘、每日批次、运行事件、iFinD 可观测性和模拟盘指数基准缓存依次使用 `0001` 至 `0007` 迁移 ID；
 - 服务重启或组件重复初始化时，已经登记的迁移不会重复执行；启动状态恢复仍作为每次运行的独立步骤，不混入一次性 Schema 迁移；
 - 行情库中的个股表、更新日志和复权库构建属于行情数据产品生命周期，不写入研究状态库的迁移日志。

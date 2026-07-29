@@ -1,4 +1,4 @@
-from app.research_assessment import (
+from app.research.assessment import (
     RESEARCH_ASSESSMENT_POLICY_VERSION,
     build_research_assessment,
     canonical_hash,

@@ -1,8 +1,8 @@
 import pytest
 
-from app.monitoring import build_monitor_evaluations, evidence_business_key
+from app.thesis.monitoring import build_monitor_evaluations, evidence_business_key
 from app.schemas import ThesisCreate
-from app.state import ThesisStore
+from app.thesis.store import ThesisStore
 
 
 def market_evidence(value="100.00", as_of="2026-07-20"):

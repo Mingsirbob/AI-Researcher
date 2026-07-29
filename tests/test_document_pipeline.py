@@ -2,7 +2,7 @@ from pathlib import Path
 
 from pypdf import PdfWriter
 
-from app.document_pipeline import (
+from app.research.documents import (
     DocumentPipelineError,
     chunk_pages,
     parse_pdf,

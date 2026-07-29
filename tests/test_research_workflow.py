@@ -1,7 +1,7 @@
-from app.analysis import analyze_stock
-from app.financial_extraction import build_financial_change_template
-from app.llm import deterministic_report
-from app.research_workflow import build_company_snapshot, build_evidence_pack
+from app.research.analysis import analyze_stock
+from app.research.financials import build_financial_change_template
+from app.integrations.llm import deterministic_report
+from app.research.workflow import build_company_snapshot, build_evidence_pack
 
 
 def _analysis():

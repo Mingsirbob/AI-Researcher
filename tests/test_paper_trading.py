@@ -5,19 +5,19 @@ from pathlib import Path
 
 import pytest
 
-from app.data_access import StockRepository
-from app.paper_trading import PAPER_BENCHMARKS, PaperExecutionService, PaperTradingService
-from app.paper_strategies import (
+from app.market.repository import StockRepository
+from app.paper.service import PAPER_BENCHMARKS, PaperExecutionService, PaperTradingService
+from app.paper.strategies import (
     LIGHTGBM_SHADOW_STRATEGY_ID,
     MULTIFACTOR_LINEAR_STRATEGY_ID,
 )
-from app.research_assessment import (
+from app.research.assessment import (
     RESEARCH_ASSESSMENT_POLICY_VERSION,
     RESEARCH_ASSESSMENT_SCHEMA_VERSION,
 )
-from app.research_store import ResearchStore
-from app.quant_store import QuantStore
-from app.sqlite_store import SQLiteStore
+from app.research.store import ResearchStore
+from app.quant.store import QuantStore
+from app.core.sqlite_store import SQLiteStore
 
 
 def _prices(path: Path) -> StockRepository:

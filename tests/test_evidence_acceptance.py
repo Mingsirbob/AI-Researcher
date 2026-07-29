@@ -2,9 +2,9 @@ import hashlib
 import json
 from pathlib import Path
 
-from app.evidence_acceptance import EvidenceAcceptanceService
-from app.financial_extraction import extract_financial_facts
-from app.research_store import ResearchStore
+from app.research.acceptance import EvidenceAcceptanceService
+from app.research.financials import extract_financial_facts
+from app.research.store import ResearchStore
 
 
 METRIC_KEYS = (

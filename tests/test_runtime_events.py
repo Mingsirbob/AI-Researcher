@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.routers import system as system_router
-from app.runtime_events import MAX_EVENT_PAYLOAD_BYTES, RuntimeEventStore
+from app.core.runtime_events import MAX_EVENT_PAYLOAD_BYTES, RuntimeEventStore
 
 
 def prepared_store(tmp_path):

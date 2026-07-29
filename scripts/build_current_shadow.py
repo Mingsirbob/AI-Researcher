@@ -14,16 +14,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.config import settings
-from app.current_shadow import (
+from app.core.config import settings
+from app.quant.current_shadow import (
     CurrentShadowPipeline,
     align_forward_adjusted_fields,
     validate_current_data,
 )
-from app.research_store import ResearchStore
-from app.quant_store import QuantStore
-from app.updater import IFindDailyClient
-from app.updater import code_to_table
+from app.research.store import ResearchStore
+from app.quant.store import QuantStore
+from app.market.updater import IFindDailyClient
+from app.market.updater import code_to_table
 
 
 def parse_args() -> argparse.Namespace:

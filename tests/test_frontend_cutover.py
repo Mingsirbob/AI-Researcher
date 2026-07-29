@@ -1,6 +1,6 @@
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.frontend_cutover import build_frontend_status, production_frontend_response
+from app.core.frontend_cutover import build_frontend_status, production_frontend_response
 
 
 def test_vue_frontend_serves_root_when_build_exists(tmp_path):

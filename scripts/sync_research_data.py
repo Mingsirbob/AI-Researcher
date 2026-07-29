@@ -11,11 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.announcement_pipeline import AnnouncementPipeline
-from app.config import settings
-from app.data_access import normalize_code
-from app.ifind import IFindService
-from app.research_store import ResearchStore
+from app.research.announcements import AnnouncementPipeline
+from app.core.config import settings
+from app.market.repository import normalize_code
+from app.integrations.ifind import IFindService
+from app.research.store import ResearchStore
 
 
 def parse_args() -> argparse.Namespace:

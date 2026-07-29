@@ -1,13 +1,13 @@
 import sqlite3
 
-from app.data_access import StockRepository
-from app.factor_backtest import FactorBacktestService
-from app.factor_evaluation import FactorEvaluationService
-from app.factor_lab import FactorLabService
-from app.factor_release import FactorReleaseService
-from app.migrations import applied_migrations
-from app.quant_store import QuantStore
-from app.research_store import ResearchStore
+from app.market.repository import StockRepository
+from app.quant.factor_backtest import FactorBacktestService
+from app.quant.factor_evaluation import FactorEvaluationService
+from app.quant.factor_lab import FactorLabService
+from app.quant.factor_release import FactorReleaseService
+from app.core.migrations import applied_migrations
+from app.quant.store import QuantStore
+from app.research.store import ResearchStore
 
 
 def _factor_row(code: str) -> dict:

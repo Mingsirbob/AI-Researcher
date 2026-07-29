@@ -3,9 +3,9 @@ from datetime import datetime, timezone
 import pandas as pd
 import pytest
 
-from app.model_registry import prepare_shadow_signals, qlib_instrument_to_code
-from app.research_store import ResearchStore
-from app.quant_store import QuantStore
+from app.quant.model_registry import prepare_shadow_signals, qlib_instrument_to_code
+from app.research.store import ResearchStore
+from app.quant.store import QuantStore
 
 
 def test_prepare_shadow_signals_ranks_each_historical_cross_section():

@@ -1,6 +1,6 @@
 import sqlite3
 
-from app.research_store import ResearchStore
+from app.research.store import ResearchStore
 
 
 def _seed(store):

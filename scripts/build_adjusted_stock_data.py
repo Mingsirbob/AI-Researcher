@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.adjusted_data import AdjustedStockDataBuilder
-from app.config import settings
-from app.updater import IFindDailyClient, default_end_date
+from app.market.adjusted_data import AdjustedStockDataBuilder
+from app.core.config import settings
+from app.market.updater import IFindDailyClient, default_end_date
 
 
 def parse_args() -> argparse.Namespace:

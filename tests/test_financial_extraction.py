@@ -1,4 +1,4 @@
-from app.financial_extraction import (
+from app.research.financials import (
     build_financial_change_template,
     extract_financial_facts,
     identify_report_period,

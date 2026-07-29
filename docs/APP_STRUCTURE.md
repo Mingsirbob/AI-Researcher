@@ -25,11 +25,12 @@ app/
 - `SQLiteStore` 作为模拟盘数据库连接边界。
 - `AppContainer` 是正式运行时唯一的服务装配入口。
 
-## 兼容路径
+## P7 退役状态
 
-根目录下原有模块暂时保留为模块别名，例如 `app.research_store` 会直接解析到
-`app.research.store`。它们不再包含实现代码，用于保证现有脚本和外部调用平稳迁移。
-兼容别名将在 P7 更新全部脚本和文档后统一移除。
+旧的 `app/*.py` 根模块兼容层已经删除，项目内脚本、测试、示例和文档均使用
+正式领域路径。不再支持 `app.research_store`、`app.quant_store`、
+`app.paper_trading` 等旧导入；外部扩展需分别迁移到 `app.research.store`、
+`app.quant.store`、`app.paper.service` 等正式路径。
 
 ## 模拟盘职责
 

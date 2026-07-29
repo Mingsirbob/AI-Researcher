@@ -1,10 +1,10 @@
 import pandas as pd
 from types import SimpleNamespace
 
-from app.config import Settings
-from app.ifind import IFindError, IFindService
+from app.core.config import Settings
+from app.integrations.ifind import IFindError, IFindService
 from app.api.handlers import enrich_with_ifind, public_ifind_context
-from app.runtime_events import RunContext, RuntimeEventStore, bind_run_context
+from app.core.runtime_events import RunContext, RuntimeEventStore, bind_run_context
 
 
 class Result:
