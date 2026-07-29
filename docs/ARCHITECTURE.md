@@ -1353,3 +1353,10 @@ testing
 这里的 `shadow` 仅表示开始积累发布后的每日前向观察。它不会修改 `factor_set`、`model_factor_binding`、Current Shadow、LightGBM、模拟盘候选、仓位或订单。后续要让模型使用该因子，必须建立新的不可变因子集、重新训练和独立绑定；从 Shadow 晋级 approved 也应在积累足够前向样本后另行评审。
 
 当前正式 `volume_ratio_20d@v2` 回测的平均单次换手为182.22%、累计成本率为32.43%，因此即使历史收益较高，也会被 M11.4 的换手和成本门禁阻断。这是发布链路的预期结果，不应通过人工按钮绕过。
+
+## 18. 应用装配与 API 边界
+
+FastAPI 进程通过 `app/container.py` 统一构造 Store 与 Service，
+`app/api/dependencies.py` 将容器作为 FastAPI 依赖提供给 HTTP 层。
+109 条路由由 `app/api/routers/` 下的八个领域 Router 负责，公共处理逻辑暂存于
+`app/api/handlers.py`；`app/main.py` 仅保留应用工厂、静态资源挂载和 Router 组合。

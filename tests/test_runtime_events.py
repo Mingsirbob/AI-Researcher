@@ -5,7 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import app.main as main_module
+from fastapi import HTTPException
+
+from app.api.routers import system as system_router
 from app.runtime_events import MAX_EVENT_PAYLOAD_BYTES, RuntimeEventStore
 
 
@@ -78,17 +80,17 @@ def test_runtime_event_api_is_incremental_and_reports_exact_has_more(tmp_path, m
     store = prepared_store(tmp_path)
     for index in range(3):
         store.append_event("run-1", "artifact_created", payload={"index": index})
-    monkeypatch.setattr(main_module, "daily_batch_store", SimpleNamespace(events=store))
+    monkeypatch.setattr(system_router, "daily_batch_store", SimpleNamespace(events=store))
 
-    first = main_module.runtime_run_events("run-1", after_seq=0, limit=2)
+    first = system_router.runtime_run_events("run-1", after_seq=0, limit=2)
     assert [item["seq"] for item in first["items"]] == [1, 2]
     assert first["last_seq"] == 2
     assert first["has_more"] is True
 
-    second = main_module.runtime_run_events("run-1", after_seq=2, limit=2)
+    second = system_router.runtime_run_events("run-1", after_seq=2, limit=2)
     assert [item["seq"] for item in second["items"]] == [3, 4]
     assert second["has_more"] is False
 
-    with pytest.raises(main_module.HTTPException) as exc_info:
-        main_module.runtime_run_events("missing", after_seq=0, limit=2)
+    with pytest.raises(HTTPException) as exc_info:
+        system_router.runtime_run_events("missing", after_seq=0, limit=2)
     assert exc_info.value.status_code == 404
