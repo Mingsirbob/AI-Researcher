@@ -16,6 +16,7 @@ from app.research_assessment import (
     RESEARCH_ASSESSMENT_SCHEMA_VERSION,
 )
 from app.research_store import ResearchStore
+from app.quant_store import QuantStore
 from app.sqlite_store import SQLiteStore
 
 
@@ -39,8 +40,9 @@ def _service(tmp_path: Path, quote_provider=None) -> tuple[PaperTradingService, 
         tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True
     )
     store.bootstrap_securities(repo.db_path)
+    quant_store = QuantStore(tmp_path / "quant.db", store)
     now = "2026-07-20T08:00:00+00:00"
-    with store.connect() as conn:
+    with quant_store.connect() as conn:
         conn.execute(
             """INSERT INTO factor_snapshot VALUES
             ('factor-1','2026-07-20','test','fp',1,1,'completed',2,2,0,?,?,NULL)""",
@@ -96,7 +98,7 @@ def _service(tmp_path: Path, quote_provider=None) -> tuple[PaperTradingService, 
             },
         )
         store.finish_research_run(run_id, status="completed")
-    return PaperTradingService(repo, store, quote_provider), store
+    return PaperTradingService(repo, store, quote_provider, quant_store=quant_store), store
 
 
 def _set_assessment_signal(store: ResearchStore, code: str, signal: str) -> None:
@@ -147,6 +149,7 @@ def test_separate_paper_database_migrates_legacy_data_and_isolates_new_writes(tm
         legacy_service.repository,
         research_store,
         paper_store=paper_store,
+        quant_store=legacy_service.quant_store,
     )
 
     with paper_store.connect() as conn:
@@ -173,6 +176,7 @@ def test_separate_paper_database_migrates_legacy_data_and_isolates_new_writes(tm
         legacy_service.repository,
         research_store,
         paper_store=paper_store,
+        quant_store=legacy_service.quant_store,
     )
     with paper_store.connect() as conn:
         assert {
@@ -207,7 +211,7 @@ def test_multifactor_account_uses_factor_ranking_not_lightgbm_shadow(tmp_path):
     multifactor = service.create_account(
         "线性多因子组合", 1_000_000, "000300.SH", MULTIFACTOR_LINEAR_STRATEGY_ID
     )
-    with store.connect() as conn:
+    with service.quant_store.connect() as conn:
         conn.execute(
             """UPDATE security_factor_snapshot
                SET return_20d=0, return_60d=0, max_drawdown_250d=-0.5,
@@ -319,7 +323,7 @@ def test_portfolio_planning_does_not_mutate_paper_account_state(tmp_path):
 def test_portfolio_sources_select_requested_date_when_newer_factor_snapshot_exists(tmp_path):
     service, store = _service(tmp_path)
     now = "2026-07-21T08:00:00+00:00"
-    with store.connect() as conn:
+    with service.quant_store.connect() as conn:
         conn.execute(
             """INSERT INTO factor_snapshot VALUES
             ('factor-newer','2026-07-21','test','new-fp',1,1,'completed',2,2,0,?,?,NULL)""",
@@ -547,7 +551,7 @@ def test_benchmark_comparison_waits_for_first_filled_order(tmp_path):
 
 def test_risk_gate_rejects_illiquid_candidate_and_inverse_volatility_allocates_weight(tmp_path):
     service, store = _service(tmp_path)
-    with store.connect() as conn:
+    with service.quant_store.connect() as conn:
         conn.execute(
             """UPDATE security_factor_snapshot SET avg_traded_value_20d=1000000
                WHERE snapshot_id='factor-1' AND security_code='000001.SZ'"""
@@ -567,6 +571,7 @@ def test_known_industry_weight_is_capped(tmp_path):
     service, store = _service(tmp_path)
     with store.connect() as conn:
         conn.execute("UPDATE security_master SET industry_l1='银行'")
+    service.quant_store.sync_security_projection()
     run = service.create_daily_run(
         as_of="2026-07-20", account_id=None, top_n=2, hold_rank_buffer=30,
         target_gross_exposure=0.24, max_industry_weight=0.20,

@@ -1360,3 +1360,10 @@ FastAPI 进程通过 `app/container.py` 统一构造 Store 与 Service，
 `app/api/dependencies.py` 将容器作为 FastAPI 依赖提供给 HTTP 层。
 109 条路由由 `app/api/routers/` 下的八个领域 Router 负责，公共处理逻辑暂存于
 `app/api/handlers.py`；`app/main.py` 仅保留应用工厂、静态资源挂载和 Router 组合。
+
+## 19. P3-P6 领域模块
+
+基础设施、外部集成、行情、研究、量化、决策、模拟盘、Thesis 和跨领域工作流
+已经从 `app/` 根目录迁移到独立领域包。`QuantStore` 已解除对 `ResearchStore` 的继承，
+模拟盘也已拆分为持久化、基准、执行、看板和 Facade。详细目录及兼容策略见
+`docs/APP_STRUCTURE.md`。

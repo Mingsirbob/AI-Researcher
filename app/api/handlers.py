@@ -9,51 +9,51 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from ..analysis import analyze_stock
-from ..config import ROOT, settings
-from ..data_access import StockRepository, normalize_code
-from ..frontend_cutover import build_frontend_status, production_frontend_response
-from ..llm import (
+from app.research.analysis import analyze_stock
+from app.core.config import ROOT, settings
+from app.market.repository import StockRepository, normalize_code
+from app.core.frontend_cutover import build_frontend_status, production_frontend_response
+from app.integrations.llm import (
     deterministic_report,
     generate_ai_report,
     generate_document_answer,
     llm_resilience_status,
 )
-from ..monitoring import build_monitor_evaluations, run_artifacts
-from ..quant import FactorSnapshotService
-from ..quant_research import neutralize_factor, universe_membership
-from ..factor_lab import FactorLabService
-from ..factor_evaluation import FactorEvaluationService
-from ..factor_backtest import FactorBacktestService
-from ..factor_release import FactorReleaseService
-from ..ifind import IFindError, IFindService
-from ..announcement_pipeline import AnnouncementPipeline
-from ..financial_extraction import build_financial_change_template
-from ..evidence_acceptance import EvidenceAcceptanceService
-from ..decision_cases import DecisionCaseService, POLICY_VERSION
-from ..decision_outcomes import DecisionOutcomeService
-from ..paper_trading import PAPER_BENCHMARKS, PaperTradingService
-from ..current_shadow_service import CurrentShadowService
-from ..daily_batch import DailyBatchRunner, DailyBatchStore
-from ..company_research import (
+from app.thesis.monitoring import build_monitor_evaluations, run_artifacts
+from app.quant.factors import FactorSnapshotService
+from app.quant.research import neutralize_factor, universe_membership
+from app.quant.factor_lab import FactorLabService
+from app.quant.factor_evaluation import FactorEvaluationService
+from app.quant.factor_backtest import FactorBacktestService
+from app.quant.factor_release import FactorReleaseService
+from app.integrations.ifind import IFindError, IFindService
+from app.research.announcements import AnnouncementPipeline
+from app.research.financials import build_financial_change_template
+from app.research.acceptance import EvidenceAcceptanceService
+from app.decision.cases import DecisionCaseService, POLICY_VERSION
+from app.decision.outcomes import DecisionOutcomeService
+from app.paper.service import PAPER_BENCHMARKS, PaperTradingService
+from app.quant.current_shadow_service import CurrentShadowService
+from app.workflows.daily_batch import DailyBatchRunner, DailyBatchStore
+from app.research.company import (
     CompanyResearchContextError,
     CompanyResearchNotFoundError,
     CompanyResearchRunError,
     CompanyResearchService,
 )
-from ..research_assessment import (
+from app.research.assessment import (
     RESEARCH_ASSESSMENT_POLICY_VERSION,
     RESEARCH_ASSESSMENT_SCHEMA_VERSION,
 )
-from ..updater import IFindDailyClient, StockDataUpdater, default_end_date
-from ..research_store import ResearchStore
-from ..runtime_events import RuntimeEventStore
-from ..sqlite_store import SQLiteStore
-from ..quant_store import QuantStore
-from ..research_workflow import (
+from app.market.updater import IFindDailyClient, StockDataUpdater, default_end_date
+from app.research.store import ResearchStore
+from app.core.runtime_events import RuntimeEventStore
+from app.core.sqlite_store import SQLiteStore
+from app.quant.store import QuantStore
+from app.research.workflow import (
     empty_financial_template,
 )
-from ..schemas import (
+from app.schemas import (
     DocumentAssistantRequest,
     DecisionCaseCreate,
     DecisionCaseReview,
@@ -86,7 +86,7 @@ from ..schemas import (
     ThesisMonitorCheckRequest,
     ThesisUpdate,
 )
-from ..state import ThesisStore
+from app.thesis.store import ThesisStore
 from ..container import container
 
 

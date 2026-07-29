@@ -6,9 +6,9 @@ import threading
 from datetime import date
 from pathlib import Path
 
-from .data_access import StockRepository
-from .primitives import annualized_volatility, maximum_drawdown, period_return, sha256_text
-from .research_store import ResearchStore
+from app.market.repository import StockRepository
+from app.core.primitives import annualized_volatility, maximum_drawdown, period_return, sha256_text
+from app.quant.store import QuantStore
 
 
 FACTOR_VERSION = "price-liquidity-v1"
@@ -156,7 +156,7 @@ def source_fingerprint(path: Path, security_count: int) -> tuple[str, int, int]:
 
 
 class FactorSnapshotService:
-    def __init__(self, repository: StockRepository, store: ResearchStore):
+    def __init__(self, repository: StockRepository, store: QuantStore):
         self.repository = repository
         self.store = store
         self._lock = threading.Lock()

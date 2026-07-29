@@ -9,6 +9,7 @@ from app.llm import deterministic_report
 from app.monitoring import build_monitor_evaluations, run_artifacts
 from app.quant import FactorSnapshotService, compute_security_factors
 from app.research_store import ResearchStore
+from app.quant_store import QuantStore
 from app.research_workflow import (
     COMPANY_SNAPSHOT_SCHEMA_VERSION,
     EVIDENCE_PACK_SCHEMA_VERSION,
@@ -96,8 +97,9 @@ def test_snapshot_generation_filtering_idempotency_and_candidate_pool(tmp_path):
     stock_db = tmp_path / "stocks.db"
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True)
-    store.bootstrap_securities(stock_db)
+    research_store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    research_store.bootstrap_securities(stock_db)
+    store = QuantStore(tmp_path / "quant.db", research_store)
     service = FactorSnapshotService(repository, store)
 
     first = service.generate("2026-07-20")
@@ -128,8 +130,9 @@ def test_factor_filters_are_applied_before_pagination(tmp_path):
     stock_db = tmp_path / "stocks.db"
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True)
-    store.bootstrap_securities(stock_db)
+    research_store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    research_store.bootstrap_securities(stock_db)
+    store = QuantStore(tmp_path / "quant.db", research_store)
     snapshot = FactorSnapshotService(repository, store).generate("2026-07-20")
 
     included = store.list_factor_rows(
@@ -147,8 +150,9 @@ def test_quant_context_ranks_passed_and_excludes_bad_quality_rows(tmp_path):
     stock_db = tmp_path / "stocks.db"
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True)
-    store.bootstrap_securities(stock_db)
+    research_store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    research_store.bootstrap_securities(stock_db)
+    store = QuantStore(tmp_path / "quant.db", research_store)
     snapshot = FactorSnapshotService(repository, store).generate("2026-07-20")
 
     passed = store.quant_context_for_security(
@@ -174,8 +178,9 @@ def test_quant_context_respects_research_cutoff(tmp_path):
     stock_db = tmp_path / "stocks.db"
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
-    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True)
-    store.bootstrap_securities(stock_db)
+    research_store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    research_store.bootstrap_securities(stock_db)
+    store = QuantStore(tmp_path / "quant.db", research_store)
     snapshot = FactorSnapshotService(repository, store).generate("2026-07-20")
 
     uncovered = store.quant_context_for_security("000001.SZ", as_of="2026-07-19")
@@ -192,13 +197,14 @@ def test_m4_candidate_research_snapshot_and_thesis_monitor_chain(tmp_path):
     create_factor_db(stock_db)
     repository = StockRepository(stock_db)
     state_db = tmp_path / "state.db"
-    store = ResearchStore(state_db, tmp_path / "documents", retain_split_domains=True)
+    store = ResearchStore(state_db, tmp_path / "documents")
     store.bootstrap_securities(stock_db)
-    factor_snapshot = FactorSnapshotService(repository, store).generate("2026-07-20")
-    candidate = store.add_research_candidate(
+    quant_store = QuantStore(tmp_path / "quant.db", store)
+    factor_snapshot = FactorSnapshotService(repository, quant_store).generate("2026-07-20")
+    candidate = quant_store.add_research_candidate(
         "000001.SZ", factor_snapshot["snapshot_id"], "M4 闭环回归"
     )
-    quant_context = store.quant_context_for_security(
+    quant_context = quant_store.quant_context_for_security(
         candidate["security_code"],
         as_of="2026-07-20",
         snapshot_id=candidate["source_snapshot_id"],

@@ -28,44 +28,34 @@ def _factor_row(code: str) -> dict:
     }
 
 
-def test_quant_store_migrates_history_and_isolates_new_writes(tmp_path):
+def test_quant_store_isolates_writes_and_syncs_security_projection(tmp_path):
     price_db = tmp_path / "prices.db"
     with sqlite3.connect(price_db):
         pass
     repository = StockRepository(price_db)
-    research_store = ResearchStore(
-        tmp_path / "research.db", tmp_path / "documents", retain_split_domains=True
-    )
+    research_store = ResearchStore(tmp_path / "research.db", tmp_path / "documents")
     research_store.upsert_security_name("000001.SZ", "平安银行", source="test")
 
-    legacy_lab = FactorLabService(research_store, repository)
-    legacy_evaluation = FactorEvaluationService(research_store, repository, legacy_lab)
-    FactorBacktestService(research_store, repository, legacy_lab, legacy_evaluation)
-    FactorReleaseService(research_store)
-    legacy_snapshot = research_store.start_factor_snapshot(
-        as_of="2026-07-20",
-        factor_version="legacy-v1",
-        source_fingerprint="legacy-fingerprint",
-        source_db_size=1,
-        source_db_mtime_ns=1,
-    )
-    research_store.finish_factor_snapshot(legacy_snapshot, [_factor_row("000001.SZ")])
-
     quant_store = QuantStore(tmp_path / "quant_research.db", research_store)
-    assert quant_store.stats()["factor_evaluations"] == 0
-    assert quant_store.stats()["factor_backtests"] == 0
     quant_lab = FactorLabService(quant_store, repository)
     quant_evaluation = FactorEvaluationService(quant_store, repository, quant_lab)
     FactorBacktestService(quant_store, repository, quant_lab, quant_evaluation)
     FactorReleaseService(quant_store)
+    initial_snapshot = quant_store.start_factor_snapshot(
+        as_of="2026-07-20",
+        factor_version="quant-v1",
+        source_fingerprint="initial-fingerprint",
+        source_db_size=1,
+        source_db_mtime_ns=1,
+    )
+    quant_store.finish_factor_snapshot(initial_snapshot, [_factor_row("000001.SZ")])
 
-    assert quant_store.factor_snapshot(legacy_snapshot)["status"] == "completed"
-    result = quant_store.list_factor_rows(legacy_snapshot)
+    assert quant_store.stats()["factor_evaluations"] == 0
+    assert quant_store.stats()["factor_backtests"] == 0
+
+    assert quant_store.factor_snapshot(initial_snapshot)["status"] == "completed"
+    result = quant_store.list_factor_rows(initial_snapshot)
     assert result["items"][0]["security_name"] == "平安银行"
-    with research_store.connect() as source, quant_store.connect() as target:
-        assert target.execute("SELECT COUNT(*) FROM factor_version").fetchone()[0] == source.execute(
-            "SELECT COUNT(*) FROM factor_version"
-        ).fetchone()[0]
 
     new_snapshot = quant_store.start_factor_snapshot(
         as_of="2026-07-21",
@@ -76,9 +66,9 @@ def test_quant_store_migrates_history_and_isolates_new_writes(tmp_path):
     )
     quant_store.finish_factor_snapshot(new_snapshot, [_factor_row("000001.SZ")])
     with research_store.connect() as source, quant_store.connect() as target:
-        assert source.execute(
-            "SELECT COUNT(*) FROM factor_snapshot WHERE snapshot_id=?", (new_snapshot,)
-        ).fetchone()[0] == 0
+        assert "factor_snapshot" not in {
+            row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
         assert target.execute(
             "SELECT COUNT(*) FROM factor_snapshot WHERE snapshot_id=?", (new_snapshot,)
         ).fetchone()[0] == 1

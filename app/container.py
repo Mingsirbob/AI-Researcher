@@ -2,27 +2,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .announcement_pipeline import AnnouncementPipeline
-from .company_research import CompanyResearchService
-from .config import ROOT, Settings, settings
-from .current_shadow_service import CurrentShadowService
-from .daily_batch import DailyBatchRunner, DailyBatchStore
-from .data_access import StockRepository
-from .decision_cases import DecisionCaseService
-from .decision_outcomes import DecisionOutcomeService
-from .evidence_acceptance import EvidenceAcceptanceService
-from .factor_backtest import FactorBacktestService
-from .factor_evaluation import FactorEvaluationService
-from .factor_lab import FactorLabService
-from .factor_release import FactorReleaseService
-from .ifind import IFindService
-from .paper_trading import PaperTradingService
-from .quant import FactorSnapshotService
-from .quant_store import QuantStore
-from .research_store import ResearchStore
-from .runtime_events import RuntimeEventStore
-from .sqlite_store import SQLiteStore
-from .state import ThesisStore
+from app.research.announcements import AnnouncementPipeline
+from app.research.company import CompanyResearchService
+from app.core.config import ROOT, Settings, settings
+from app.quant.current_shadow_service import CurrentShadowService
+from app.workflows.daily_batch import DailyBatchRunner, DailyBatchStore
+from app.market.repository import StockRepository
+from app.decision.cases import DecisionCaseService
+from app.decision.outcomes import DecisionOutcomeService
+from app.research.acceptance import EvidenceAcceptanceService
+from app.quant.factor_backtest import FactorBacktestService
+from app.quant.factor_evaluation import FactorEvaluationService
+from app.quant.factor_lab import FactorLabService
+from app.quant.factor_release import FactorReleaseService
+from app.integrations.ifind import IFindService
+from app.paper.service import PaperTradingService
+from app.quant.factors import FactorSnapshotService
+from app.quant.store import QuantStore
+from app.research.store import ResearchStore
+from app.core.runtime_events import RuntimeEventStore
+from app.core.sqlite_store import SQLiteStore
+from app.thesis.store import ThesisStore
 
 
 @dataclass(slots=True)

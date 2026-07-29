@@ -5,6 +5,7 @@ import pytest
 
 from app.model_registry import prepare_shadow_signals, qlib_instrument_to_code
 from app.research_store import ResearchStore
+from app.quant_store import QuantStore
 
 
 def test_prepare_shadow_signals_ranks_each_historical_cross_section():
@@ -53,9 +54,8 @@ def test_prepare_shadow_signals_rejects_index_mismatch():
 
 
 def test_model_run_registration_is_immutable_and_queryable(tmp_path):
-    store = ResearchStore(
-        tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True
-    )
+    research_store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
+    store = QuantStore(tmp_path / "quant.db", research_store)
     imported_at = datetime.now(timezone.utc).isoformat()
     model = {
         "model_run_id": "run-1",

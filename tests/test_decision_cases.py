@@ -14,9 +14,7 @@ CODE = "300750.SZ"
 
 
 def build_service(tmp_path, *, liquidity=1_500_000_000.0):
-    store = ResearchStore(
-        tmp_path / "state.db", tmp_path / "documents", retain_split_domains=True
-    )
+    store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
     theses = ThesisStore(tmp_path / "state.db")
     store.upsert_security_name(CODE, "宁德时代", "test")
 
@@ -130,7 +128,8 @@ def build_service(tmp_path, *, liquidity=1_500_000_000.0):
         "limitations": ["shadow only"],
         "imported_at": now,
     }
-    store.register_model_run(
+    quant_store = QuantStore(tmp_path / "quant_research.db", store)
+    quant_store.register_model_run(
         model_run=model,
         artifacts=[
             {
@@ -152,7 +151,7 @@ def build_service(tmp_path, *, liquidity=1_500_000_000.0):
         },
         signals=[],
     )
-    store.register_model_validation(
+    quant_store.register_model_validation(
         {
             "validation_id": "validation-1",
             "model_run_id": "model-run-1",
@@ -165,7 +164,7 @@ def build_service(tmp_path, *, liquidity=1_500_000_000.0):
             "created_at": now,
         }
     )
-    store.register_current_shadow(
+    quant_store.register_current_shadow(
         {
             "snapshot_id": "current-shadow-1",
             "model_run_id": "model-run-1",
@@ -200,7 +199,13 @@ def build_service(tmp_path, *, liquidity=1_500_000_000.0):
             }
         ],
     )
-    return store, theses, DecisionCaseService(store, theses), run_id, thesis["id"]
+    return (
+        store,
+        theses,
+        DecisionCaseService(store, theses, quant_store),
+        run_id,
+        thesis["id"],
+    )
 
 
 def create_case(service, run_id, thesis_id, *, as_of=AS_OF):
