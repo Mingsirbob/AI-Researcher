@@ -150,7 +150,7 @@ def test_builder_can_freeze_an_explicit_universe(tmp_path):
         universe=universe,
         universe_name="csi300_current",
         universe_as_of="2026-07-26",
-        universe_source="iFinD THS_WCQuery",
+        universe_source="iFinD THS_DR",
     ).build(
         start_date=date(2020, 1, 2),
         end_date=date(2020, 1, 3),

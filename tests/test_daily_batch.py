@@ -1,6 +1,12 @@
 import asyncio
+from datetime import date
 
-from app.workflows.daily_batch import DAILY_BATCH_STEPS, DailyBatchRunner, DailyBatchStore
+from app.workflows.daily_batch import (
+    DAILY_BATCH_STEPS,
+    DailyBatchRunner,
+    DailyBatchStore,
+    resolve_batch_date,
+)
 from app.research.store import ResearchStore
 from app.core.runtime_events import RuntimeEventStore
 from app.core.sqlite_store import SQLiteStore
@@ -22,6 +28,25 @@ def handlers(calls, *, fail_step=None):
 
         result[name] = run
     return result
+
+
+def test_batch_date_uses_confirmed_latest_trading_day_for_default_and_weekend():
+    def calendar(start, end):
+        assert start == date(2026, 7, 2)
+        assert end == date(2026, 8, 2)
+        return [date(2026, 7, 31)]
+
+    assert resolve_batch_date(
+        None,
+        local_latest="2026-07-29",
+        trading_dates=calendar,
+        default_target=date(2026, 8, 2),
+    ) == "2026-07-31"
+    assert resolve_batch_date(
+        "2026-08-02",
+        local_latest="2026-07-31",
+        trading_dates=calendar,
+    ) == "2026-07-31"
 
 
 def test_daily_batch_completes_all_steps_and_reuses_same_contract(tmp_path):

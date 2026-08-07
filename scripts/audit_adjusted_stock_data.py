@@ -14,6 +14,12 @@ if str(ROOT) not in sys.path:
 from app.core.config import settings
 
 
+def table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="只读审计复权日线数据库")
     parser.add_argument("--db", type=Path, default=settings.stock_qfq_db)
@@ -53,16 +59,17 @@ def main() -> int:
             "global_min": min(row[0] for row in stats if row[0]),
             "global_max": max(row[1] for row in stats if row[1]),
             "null_close_rows": sum(row[3] or 0 for row in stats),
-            "quality_issues": conn.execute(
-                "SELECT COUNT(*) FROM data_quality_issues"
-            ).fetchone()[0],
+            "quality_issues": (
+                conn.execute("SELECT COUNT(*) FROM data_quality_issues").fetchone()[0]
+                if table_exists(conn, "data_quality_issues") else 0
+            ),
             "quality_exceptions": [
                 dict(row)
                 for row in conn.execute(
                     "SELECT security_code, trading_date, rule, verification "
                     "FROM price_quality_exceptions ORDER BY trading_date, security_code"
                 )
-            ],
+            ] if table_exists(conn, "price_quality_exceptions") else [],
             "metadata": metadata,
         }
     print(json.dumps(result, ensure_ascii=False, indent=2))

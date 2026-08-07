@@ -92,6 +92,8 @@ def test_quant_store_isolates_writes_and_syncs_security_projection(tmp_path):
         "0019_split_factor_evaluation_database",
         "0020_split_factor_backtest_database",
         "0021_split_factor_release_database",
+        "0026_factor_catalog_cleanup",
+        "0027_simple_quant_research",
     ]
 
     QuantStore(tmp_path / "quant_research.db", research_store)

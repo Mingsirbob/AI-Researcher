@@ -137,12 +137,13 @@ def evaluate_decision_case(case_id: str, request: DecisionOutcomeEvaluate) -> di
     start = date.fromisoformat(case["as_of"])
     if end < start:
         raise HTTPException(status_code=422, detail="评价截止日不得早于案例截止日")
-    client = IFindDailyClient(settings, adjustment="forward")
     try:
-        client.login()
-        frame = client.fetch(
-            [case["security_code"], case["benchmark_code"]], start, end,
-            max_attempts=settings.ifind_max_attempts,
+        frame = ifind_service.get_daily_prices(
+            [case["security_code"], case["benchmark_code"]],
+            start,
+            end,
+            adjustment="forward",
+            max_attempts=min(settings.ifind_max_attempts, 2),
         )
         rows = frame.to_dict(orient="records")
         security_rows = [row for row in rows if row["thscode"] == case["security_code"]]
@@ -155,5 +156,3 @@ def evaluate_decision_case(case_id: str, request: DecisionOutcomeEvaluate) -> di
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"iFinD 结果评价失败：{exc}") from exc
-    finally:
-        client.logout()

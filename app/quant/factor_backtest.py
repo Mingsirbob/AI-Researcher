@@ -10,16 +10,20 @@ from datetime import date
 from typing import Any
 
 from app.market.repository import StockRepository
+from app.backtest.contracts import ScoreSignal, equal_weight_top_n
+from app.backtest.engine import DailyBacktestEngine
+from app.backtest.market_rules import ChinaAConfig, ChinaAMarketRules
 from app.quant.factor_evaluation import FactorEvaluationService, MIN_CROSS_SECTION
 from app.quant.factor_lab import FactorLabService, evaluate_template
 from app.core.migrations import apply_migration
 from app.core.primitives import canonical_hash
 from app.quant.factors import source_fingerprint
+from app.quant.simple_research import SimpleResearchCatalog
 from app.research.store import utc_now
 from app.quant.store import QuantStore
 
 
-FACTOR_BACKTEST_VERSION = "factor-backtest-v1.1"
+FACTOR_BACKTEST_VERSION = "factor-backtest-v2-shared-engine"
 BENCHMARK_CODE = "CSI300_CURRENT_EQUAL_WEIGHT"
 BENCHMARK_NAME = "当前沪深300等权代理"
 FACTOR_BACKTEST_TABLES = (
@@ -63,6 +67,7 @@ class FactorBacktestService:
         self.repository = repository
         self.factor_lab = factor_lab
         self.factor_evaluation = factor_evaluation
+        self.simple_catalog = SimpleResearchCatalog(store)
         self._lock = threading.Lock()
         apply_migration(store.connect, "0011_factor_backtest", self._create_schema)
         if hasattr(store, "migrate_legacy"):
@@ -310,8 +315,8 @@ class FactorBacktestService:
         limitations = [
             "股票池是2026-07-26查询时点的当前沪深300，历史回测存在幸存者偏差。",
             "基准是当前沪深300成分的每日等权代理，不是官方沪深300指数。",
-            "已模拟佣金、卖出印花税和固定滑点；未模拟最低佣金、100股整手和冲击成本。",
-            "停牌或缺少有效开盘价时不成交；尚未按板块和历史规则完整识别涨跌停。",
+            "使用共享A股执行引擎模拟最低佣金、整手、卖出印花税、过户费、固定滑点和成交量上限。",
+            "停牌或缺少有效开盘价时不成交；涨跌停按执行日开盘价和前收盘价保守判断。",
             "回测只验证单因子Top-N组合，不自动发布因子、重训模型或进入模拟盘。",
         ]
         started_at = utc_now()
@@ -381,6 +386,7 @@ class FactorBacktestService:
                         _json(result["metrics"]), utc_now(), backtest_id,
                     ),
                 )
+            self.simple_catalog.sync_from_legacy()
         except Exception as exc:
             with self.store.connect() as conn:
                 conn.execute(
@@ -404,6 +410,105 @@ class FactorBacktestService:
         return statistics.fmean(values) / deviation * math.sqrt(252) if deviation else None
 
     def _compute(
+        self,
+        *,
+        backtest_id: str,
+        factor: dict,
+        start_date: str,
+        end_date: str,
+        top_n: int,
+        rebalance_step: int,
+        initial_capital: float,
+        commission_rate: float,
+        stamp_duty_rate: float,
+        slippage_rate: float,
+    ) -> dict:
+        histories: dict[str, dict] = {}
+        calendar: set[str] = set()
+        for code, rows in self.repository.iter_histories(end=end_date, limit=3000):
+            if not rows:
+                continue
+            materialized = [dict(row) for row in rows]
+            by_date = {row["time"]: row for row in materialized}
+            histories[code] = {
+                "rows": materialized,
+                "by_date": by_date,
+                "position": {row["time"]: index for index, row in enumerate(materialized)},
+            }
+            calendar.update(by_date)
+        trading_dates = [value for value in sorted(calendar) if start_date <= value <= end_date]
+        if len(trading_dates) < rebalance_step + 2:
+            raise ValueError("回测区间不足以形成两次净值观察")
+
+        targets = []
+        lookback = int(factor["lookback"])
+        for signal_index in range(0, len(trading_dates) - 1, rebalance_step):
+            signal_date = trading_dates[signal_index]
+            records: list[tuple[str, float]] = []
+            for code, history in histories.items():
+                position = history["position"].get(signal_date)
+                if position is None:
+                    continue
+                tail = history["rows"][max(0, position - lookback - 1): position + 1]
+                raw_value = evaluate_template(factor["template_id"], lookback, tail)
+                if raw_value is None or not math.isfinite(raw_value):
+                    continue
+                directional = raw_value if factor["direction"] == "positive" else -raw_value
+                records.append((code, directional))
+            if len(records) < max(MIN_CROSS_SECTION, top_n):
+                continue
+            records.sort(key=lambda item: (-item[1], item[0]))
+            signals = [
+                ScoreSignal(
+                    source_type="factor",
+                    source_id=f"{factor['factor_id']}@{factor['version']}",
+                    as_of=signal_date,
+                    security_code=code,
+                    score=score,
+                    rank=rank,
+                )
+                for rank, (code, score) in enumerate(records, 1)
+            ]
+            targets.append(equal_weight_top_n(
+                signals,
+                execution_date=trading_dates[signal_index + 1],
+                top_n=top_n,
+            ))
+        if not targets:
+            raise ValueError("没有形成满足最小横截面数量的可执行调仓")
+
+        rules = ChinaAMarketRules(ChinaAConfig(
+            commission_rate=commission_rate,
+            minimum_commission=5.0 if commission_rate > 0 else 0.0,
+            stamp_duty_rate=stamp_duty_rate,
+            transfer_fee_rate=0.00001 if commission_rate > 0 or stamp_duty_rate > 0 else 0.0,
+            slippage_rate=slippage_rate,
+        ))
+        result = DailyBacktestEngine(rules).run(
+            backtest_id=backtest_id,
+            histories=histories,
+            trading_dates=trading_dates,
+            targets=targets,
+            initial_capital=initial_capital,
+        )
+        result_hash = canonical_hash({
+            "nav": result.nav_rows,
+            "rebalances": result.rebalance_rows,
+            "trades": result.trade_rows,
+            "metrics": result.metrics,
+        })
+        return {
+            "effective_start_date": result.effective_start_date,
+            "effective_end_date": result.effective_end_date,
+            "nav_rows": result.nav_rows,
+            "rebalance_rows": result.rebalance_rows,
+            "trade_rows": result.trade_rows,
+            "metrics": result.metrics,
+            "result_hash": result_hash,
+            "blocked_orders": result.blocked_orders,
+        }
+
+    def _compute_legacy(
         self,
         *,
         backtest_id: str,

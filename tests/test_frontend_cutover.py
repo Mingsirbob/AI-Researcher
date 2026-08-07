@@ -3,6 +3,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from app.core.frontend_cutover import build_frontend_status, production_frontend_response
 
 
+def test_strategy_editor_route_is_served_by_vue_app():
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    response = TestClient(app).get("/strategies")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+
+
 def test_vue_frontend_serves_root_when_build_exists(tmp_path):
     dist = tmp_path / "frontend" / "dist"
     dist.mkdir(parents=True)

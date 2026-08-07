@@ -10,6 +10,7 @@ const routes = [
   { path: "/factor-evaluation", name: "factor-evaluation", component: () => import("@/features/lab/FactorEvaluationView.vue"), meta: { title: "因子评价", group: "lab" } },
   { path: "/backtest", name: "backtest", component: () => import("@/features/lab/BacktestView.vue"), meta: { title: "策略回测与 Shadow", group: "lab" } },
   { path: "/factor-library", name: "factor-library", component: () => import("@/features/lab/FactorLibraryView.vue"), meta: { title: "因子库", group: "lab" } },
+  { path: "/strategies", name: "strategies", component: () => import("@/features/strategy/StrategyEditorView.vue"), meta: { title: "策略编辑器", group: "lab" } },
   { path: "/decisions", name: "decisions", component: () => import("@/features/audit/DecisionView.vue"), meta: { title: "案例评价", group: "audit" } },
   { path: "/acceptance", name: "acceptance", component: () => import("@/features/audit/AcceptanceView.vue"), meta: { title: "质量验收", group: "audit" } },
 ];

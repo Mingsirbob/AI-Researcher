@@ -41,6 +41,7 @@ def _positive_int(name: str, default: int) -> int:
 @dataclass(frozen=True)
 class Settings:
     stock_db: Path = ROOT / "data" / "stock_data.db"
+    stock_pool_db: Path = ROOT / "data" / "stock_pool.db"
     stock_qfq_db: Path = ROOT / "data" / "stock_data_qfq.db"
     stock_hfq_db: Path = ROOT / "data" / "stock_data_hfq.db"
     state_db: Path = ROOT / "data" / "research_state.db"
@@ -49,6 +50,7 @@ class Settings:
     document_root: Path = ROOT / "data" / "documents"
     model_artifact_root: Path = ROOT / "data" / "model_artifacts"
     current_shadow_root: Path = ROOT / "data" / "current_shadow"
+    strategy_run_root: Path = ROOT / "data" / "strategy_runs"
     llm_base_url: str = os.getenv("TRADINGAGENTS_LLM_BACKEND_URL", "")
     llm_api_key: str = os.getenv("OPENAI_COMPATIBLE_API_KEY", "")
     quick_model: str = os.getenv("TRADINGAGENTS_QUICK_THINK_LLM", "")
@@ -66,6 +68,9 @@ class Settings:
     llm_backoff_seconds: float = _positive_float("LLM_BACKOFF_SECONDS", 0.75)
     llm_circuit_failure_threshold: int = _positive_int("LLM_CIRCUIT_FAILURE_THRESHOLD", 3)
     llm_circuit_recovery_seconds: float = _positive_float("LLM_CIRCUIT_RECOVERY_SECONDS", 60.0)
+    strategy_execution_timeout_seconds: float = _positive_float(
+        "STRATEGY_EXECUTION_TIMEOUT_SECONDS", 3.0
+    )
     @property
     def llm_configured(self) -> bool:
         return bool(self.llm_base_url and self.llm_api_key and self.quick_model)

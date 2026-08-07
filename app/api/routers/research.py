@@ -18,7 +18,7 @@ async def stock_context(code: str, as_of: str | None = None) -> dict:
     analysis = build_analysis(code, as_of)
     try:
         context = await run_in_threadpool(
-            ifind_service.get_context,
+            load_ifind_context,
             analysis["security"]["code"],
             analysis["as_of"],
         )
@@ -33,7 +33,7 @@ async def stock_context(code: str, as_of: str | None = None) -> dict:
             )
         )
         return context
-    except IFindError as exc:
+    except IFindDataError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
@@ -43,12 +43,12 @@ async def research(request: ResearchRequest) -> dict:
     if ifind_service.status()["configured"]:
         try:
             context = await run_in_threadpool(
-                ifind_service.get_context,
+                load_ifind_context,
                 analysis["security"]["code"],
                 analysis["as_of"],
             )
             enrich_with_ifind(analysis, context)
-        except IFindError as exc:
+        except IFindDataError as exc:
             analysis["uncertainties"].append(f"iFinD 补充数据不可用：{exc}")
     document_evidence = research_store.evidence_for_security(
         analysis["security"]["code"], as_of=analysis["as_of"], limit=5
@@ -368,7 +368,7 @@ async def sync_announcements(
                 document_scope=document_scope,
             )
         )
-    except IFindError as exc:
+    except IFindDataError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

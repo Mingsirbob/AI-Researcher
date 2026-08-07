@@ -20,10 +20,15 @@ class PaperExecutionService(
         portfolio_decision: PortfolioDecisionService | None = None,
         paper_store: SQLiteStore | ResearchStore | None = None,
         quant_store: QuantStore | None = None,
+        strategy_service: Any | None = None,
+        stock_pool_store: StockPoolStore | None = None,
     ) -> None:
-        super().__init__(repository, store, quote_provider, paper_store, quant_store)
+        super().__init__(
+            repository, store, quote_provider, paper_store, quant_store,
+            strategy_service, stock_pool_store,
+        )
         self.portfolio_decision = portfolio_decision or PortfolioDecisionService(
-            repository, quant_store or store, store
+            repository, quant_store or store, store, stock_pool_store=self.stock_pool_store
         )
 
     def research_targets(
@@ -40,7 +45,11 @@ class PaperExecutionService(
 
     def review_holdings(self, *, account_id: str | None, as_of: str) -> dict:
         account = self.account(account_id) if account_id else self.default_account()
-        _, shadow = self.portfolio_decision.sources(as_of)
+        _, shadow = (
+            self.portfolio_decision.sources(as_of, account["strategy"])
+            if account["strategy"].get("signal_source") in {"multifactor_linear", "python_code"}
+            else self.portfolio_decision.sources(as_of)
+        )
         positions = self._positions(account["account_id"], as_of, shadow["snapshot_id"])
         return self.portfolio_decision.review_holdings(
             account_id=account["account_id"],
@@ -65,21 +74,24 @@ class PaperExecutionService(
         account = self.account(account_id) if account_id else self.default_account()
         strategy = account["strategy"]
         defaults = strategy["config"]
+        deployed = account.get("strategy_deployment") is not None
+        top_n = int(defaults.get("top_n", top_n))
+        hold_rank_buffer = int(defaults.get("hold_rank_buffer", hold_rank_buffer))
         target_gross_exposure = float(
             defaults.get("target_gross_exposure", DEFAULT_TARGET_GROSS_EXPOSURE)
-            if target_gross_exposure is None else target_gross_exposure
+            if target_gross_exposure is None or deployed else target_gross_exposure
         )
         max_position_weight = float(
             defaults.get("max_position_weight", DEFAULT_MAX_POSITION_WEIGHT)
-            if max_position_weight is None else max_position_weight
+            if max_position_weight is None or deployed else max_position_weight
         )
         max_industry_weight = float(
             defaults.get("max_industry_weight", DEFAULT_MAX_INDUSTRY_WEIGHT)
-            if max_industry_weight is None else max_industry_weight
+            if max_industry_weight is None or deployed else max_industry_weight
         )
         max_pair_correlation = float(
             defaults.get("max_pair_correlation", DEFAULT_MAX_PAIR_CORRELATION)
-            if max_pair_correlation is None else max_pair_correlation
+            if max_pair_correlation is None or deployed else max_pair_correlation
         )
         with self.paper_store.connect() as conn:
             latest_fill = conn.execute(
@@ -90,7 +102,11 @@ class PaperExecutionService(
             raise ValueError(
                 f"研究日 {as_of} 早于账户最近成交日 {latest_fill}，禁止回溯重算当前账户"
             )
-        _, shadow = self.portfolio_decision.sources(as_of)
+        _, shadow = (
+            self.portfolio_decision.sources(as_of, strategy)
+            if strategy.get("signal_source") in {"multifactor_linear", "python_code"}
+            else self.portfolio_decision.sources(as_of)
+        )
         strategy_version = f'{strategy["strategy_id"]}@{strategy["version"]}'
         existing = self._run_for_date(account["account_id"], as_of, strategy_version)
         if existing:

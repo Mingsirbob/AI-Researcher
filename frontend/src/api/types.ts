@@ -70,6 +70,39 @@ export interface PaperTarget {
   current_assessment?: Record<string, unknown> | null;
 }
 
+export interface PaperOrder {
+  order_id: string;
+  run_id: string;
+  account_id: string;
+  as_of: string;
+  run_status: string;
+  strategy_version: string;
+  security_code: string;
+  security_name?: string;
+  side: "buy" | "sell";
+  status: "proposed" | "approved" | "rejected" | "filled" | "cancelled";
+  quantity: number;
+  reference_price?: number | null;
+  target_weight?: number | null;
+  reason?: Record<string, unknown>;
+  reviewer?: string | null;
+  review_note?: string | null;
+  reviewed_at?: string | null;
+  fill_date?: string | null;
+  fill_price?: number | null;
+  gross_amount?: number | null;
+  fees?: number | null;
+  execution_quote_id?: string | null;
+  created_at: string;
+}
+
+export interface PaperOrderLedger {
+  account_id: string;
+  latest_run_id?: string | null;
+  latest_as_of?: string | null;
+  items: PaperOrder[];
+}
+
 export interface MaturityItem {
   case_id: string;
   security_code: string;
@@ -124,6 +157,11 @@ export interface FactorVersion {
   status?: string;
   lifecycle_status?: string;
   model_used?: boolean;
+  category?: string;
+  usage_scope?: "model_bundle" | "strategy_component" | "research_only" | "retired";
+  strategy_compatible?: boolean;
+  strategy_eligible?: boolean;
+  strategy_runtime_field?: string | null;
 }
 
 export interface FactorLabRun {

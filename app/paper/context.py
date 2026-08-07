@@ -6,9 +6,15 @@ import uuid
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from app.backtest.market_rules import ChinaAConfig, ChinaAMarketRules
 from app.market.repository import StockRepository, normalize_code
+from app.market.stock_pool import MAJOR_INDEX_BENCHMARKS, StockPoolStore
 from app.core.migrations import apply_migration
-from app.paper.strategies import DEFAULT_PAPER_STRATEGY_ID, PAPER_STRATEGIES
+from app.paper.strategies import (
+    DEFAULT_PAPER_STRATEGY_ID,
+    LIGHTGBM_SHADOW_STRATEGY_ID,
+    PAPER_STRATEGIES,
+)
 from app.core.primitives import canonical_hash
 from app.decision.portfolio import (
     COMMISSION_RATE,
@@ -26,14 +32,7 @@ from app.quant.store import QuantStore
 from app.core.sqlite_store import SQLiteStore, migrate_legacy_tables
 
 
-PAPER_BENCHMARKS = {
-    "000001.SH": "上证指数",
-    "000300.SH": "沪深300",
-    "399001.SZ": "深证成指",
-    "399006.SZ": "创业板指",
-    "000688.SH": "科创50",
-    "000510.CSI": "中证A500",
-}
+PAPER_BENCHMARKS = MAJOR_INDEX_BENCHMARKS
 
 PAPER_TRADING_TABLES = (
     "paper_strategy",

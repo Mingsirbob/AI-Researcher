@@ -7,11 +7,67 @@ router = domain_router()
 def owns(path: str) -> bool:
     return (
         path.startswith("/api/factor-")
+        or path.startswith("/api/quant-research")
         or path.startswith("/api/model-runs")
         or path.startswith("/api/current-shadow")
         or path.startswith("/api/quant/")
         or path.startswith("/api/market/universe-membership")
     )
+
+
+@router.get("/api/quant-research/overview")
+def quant_research_overview() -> dict:
+    return simple_research_catalog.overview()
+
+
+@router.get("/api/quant-research/factor-sets")
+def quant_research_factor_sets() -> dict:
+    return {"items": simple_research_catalog.factor_sets()}
+
+
+@router.get("/api/quant-research/factors")
+def quant_research_factors(
+    factor_set_id: str | None = None,
+    status: str | None = Query(None, pattern="^(draft|active|disabled)$"),
+) -> dict:
+    return {
+        "items": simple_research_catalog.factors(
+            factor_set_id=factor_set_id,
+            status=status,
+        )
+    }
+
+
+@router.get("/api/quant-research/models")
+def quant_research_models(
+    status: str | None = Query(None, pattern="^(draft|active|disabled|failed)$"),
+) -> dict:
+    return {"items": simple_research_catalog.models(status=status)}
+
+
+@router.get("/api/quant-research/experiments")
+def quant_research_experiments(
+    experiment_type: str | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    return {
+        "items": simple_research_catalog.experiments(
+            experiment_type=experiment_type,
+            target_type=target_type,
+            target_id=target_id,
+            limit=limit,
+        )
+    }
+
+
+@router.get("/api/quant-research/experiments/{experiment_id}")
+def quant_research_experiment(experiment_id: str) -> dict:
+    item = simple_research_catalog.experiment(experiment_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="研究实验不存在")
+    return item
 
 
 @router.get("/api/market/universe-membership")

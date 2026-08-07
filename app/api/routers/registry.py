@@ -4,7 +4,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 from starlette.routing import BaseRoute
 
-from . import acceptance, decisions, paper, quant, research, securities, system, theses
+from . import acceptance, decisions, paper, quant, research, securities, strategy, system, theses
 
 
 DOMAIN_MODULES = (
@@ -13,6 +13,7 @@ DOMAIN_MODULES = (
     ("quant", quant),
     ("decisions", decisions),
     ("paper", paper),
+    ("strategy", strategy),
     ("theses", theses),
     ("acceptance", acceptance),
     ("system", system),

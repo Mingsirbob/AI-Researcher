@@ -10,48 +10,32 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from time import monotonic
 from typing import Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from app.core.config import Settings
-from app.core.observability import IFindCallObserver, classify_ifind_error
+from app.core.observability import classify_ifind_error
 from app.core.primitives import code_to_table, table_to_code
 from app.core.resilience import (
     CallInProgressError,
     CallTimeoutError,
-    CircuitBreaker,
     CircuitOpenError,
-    DaemonCallRunner,
     backoff_seconds,
 )
 
 
-INDICATORS = "open;high;low;close;vwap;volume"
 ADJUSTMENT_PARAMS = {
     "unadjusted": "",
     "backward": "CPS:1",
     "forward": "CPS:2",
 }
 UNADJUSTED_PARAMS = ADJUSTMENT_PARAMS["unadjusted"]
-TRADING_CALENDAR_EXCHANGE = "SSE"
-TRADING_CALENDAR_PARAMS = "dateType:0"
 DAILY_COLUMNS = ("time", "thscode", "open", "high", "low", "close", "vwap", "volume")
 REQUIRED_COLUMNS = set(DAILY_COLUMNS)
 MAX_ABSOLUTE_DAILY_RETURN = 0.60
 PRICE_COMPARISON_REL_TOLERANCE = 1e-8
 PRICE_COMPARISON_ABS_TOLERANCE = 1e-4
-RETRYABLE_IFIND_CATEGORIES = {
-    "timeout",
-    "rate_limit",
-    "network",
-    "environment_or_network",
-    "upstream",
-}
-
-
 class StockUpdateError(RuntimeError):
     def __init__(self, message: str, error_code: int | None = None):
         super().__init__(message)
@@ -284,303 +268,6 @@ def validate_daily_frame(
     return issues
 
 
-class IFindDailyClient:
-    def __init__(
-        self,
-        settings: Settings,
-        observer: IFindCallObserver | None = None,
-        *,
-        adjustment: str = "unadjusted",
-    ):
-        if adjustment not in ADJUSTMENT_PARAMS:
-            raise ValueError(f"不支持的复权口径：{adjustment}")
-        self.settings = settings
-        self.adjustment = adjustment
-        self.history_params = ADJUSTMENT_PARAMS[adjustment]
-        self.observer = observer or IFindCallObserver(
-            settings.state_db,
-            secrets=(settings.ifind_username, settings.ifind_password),
-        )
-        self.circuit = CircuitBreaker(
-            "iFinD updater",
-            failure_threshold=settings.ifind_circuit_failure_threshold,
-            recovery_timeout_seconds=settings.ifind_circuit_recovery_seconds,
-        )
-        self.runner = DaemonCallRunner("iFinD updater SDK")
-        self._sdk = None
-        self._logged_in = False
-        self._owns_login = False
-
-    def _execute(
-        self,
-        operation: str,
-        function,
-        transform,
-        *,
-        requested_items: int = 0,
-        max_attempts: int = 1,
-        first_attempt: int = 1,
-    ):
-        try:
-            self.circuit.before_call()
-        except CircuitOpenError as exc:
-            started_at = monotonic()
-            self.observer.record(
-                operation=operation,
-                status="error",
-                started_at=started_at,
-                attempt=first_attempt,
-                requested_items=requested_items,
-                error=exc,
-                error_category="circuit_open",
-            )
-            raise
-
-        last_error: Exception | None = None
-        for offset in range(max_attempts):
-            attempt = first_attempt + offset
-            started_at = monotonic()
-            try:
-                raw = self.runner.call(function, self.settings.ifind_timeout_seconds)
-                value = transform(raw)
-            except Exception as exc:
-                last_error = exc
-                error_code = getattr(exc, "error_code", None)
-                category = classify_ifind_error(exc, error_code)
-                self.observer.record(
-                    operation=operation,
-                    status="error",
-                    started_at=started_at,
-                    attempt=attempt,
-                    requested_items=requested_items,
-                    error_code=error_code,
-                    error=exc,
-                    error_category=category,
-                )
-                retryable = category in RETRYABLE_IFIND_CATEGORIES
-                if retryable:
-                    self.circuit.record_failure()
-                else:
-                    self.circuit.record_success()
-                timed_out = isinstance(exc, (CallTimeoutError, CallInProgressError))
-                if (
-                    not retryable
-                    or timed_out
-                    or self.circuit.status()["state"] == "open"
-                    or offset + 1 >= max_attempts
-                ):
-                    break
-                time.sleep(
-                    backoff_seconds(
-                        offset + 1,
-                        self.settings.ifind_backoff_seconds,
-                        self.settings.ifind_backoff_seconds * 8,
-                    )
-                )
-                continue
-            rows_returned = len(value) if isinstance(value, pd.DataFrame) else None
-            self.observer.record(
-                operation=operation,
-                status="success",
-                started_at=started_at,
-                attempt=attempt,
-                requested_items=requested_items,
-                rows_returned=rows_returned,
-            )
-            self.circuit.record_success()
-            return value
-        if last_error is not None:
-            raise last_error
-        raise StockUpdateError(f"{operation} 调用失败")
-
-    def login(self) -> None:
-        if not self.settings.ifind_username or not self.settings.ifind_password:
-            raise StockUpdateError("缺少 IFIND_USER 或 IFIND_PASSWORD")
-        from iFinDPy import (
-            THS_Date_Query,
-            THS_HD,
-            THS_WCQuery,
-            THS_iFinDLogin,
-            THS_iFinDLogout,
-        )
-
-        self._sdk = {
-            "history": THS_HD,
-            "calendar": THS_Date_Query,
-            "universe": THS_WCQuery,
-            "login": THS_iFinDLogin,
-            "logout": THS_iFinDLogout,
-        }
-        def parse_login(value) -> int:
-            result = int(value)
-            if result not in {0, -201}:
-                raise StockUpdateError(f"iFinD 登录失败（{result}）", error_code=result)
-            return result
-
-        result = self._execute(
-            "THS_iFinDLogin",
-            lambda: self._sdk["login"](
-                self.settings.ifind_username,
-                self.settings.ifind_password,
-            ),
-            parse_login,
-            max_attempts=self.settings.ifind_max_attempts,
-        )
-        self._logged_in = True
-        self._owns_login = result == 0
-
-    def fetch_trading_dates(self, start: date, end: date) -> list[date]:
-        if not self._logged_in or self._sdk is None:
-            raise StockUpdateError("iFinD 尚未登录")
-        if start > end:
-            return []
-
-        def query_calendar():
-            return self._sdk["calendar"](
-                TRADING_CALENDAR_EXCHANGE,
-                TRADING_CALENDAR_PARAMS,
-                start.isoformat(),
-                end.isoformat(),
-            )
-
-        def parse_calendar(result):
-            error_code = int(getattr(result, "errorcode", -1))
-            if error_code != 0:
-                raise StockUpdateError(
-                    f"iFinD 交易日历查询失败（{error_code}）："
-                    f"{getattr(result, 'errmsg', '未知错误')}",
-                    error_code=error_code,
-                )
-            raw = getattr(result, "data", None)
-            values = raw.split(",") if isinstance(raw, str) else getattr(result, "time", None)
-            if values is None:
-                raise DataContractError("iFinD 交易日历结果缺少 data/time")
-            parsed: list[date] = []
-            for value in values:
-                text = str(value).strip()[:10]
-                if not text:
-                    continue
-                try:
-                    trading_date = date.fromisoformat(text)
-                except ValueError as exc:
-                    raise DataContractError(f"iFinD 交易日历包含非法日期：{text}") from exc
-                if trading_date < start or trading_date > end:
-                    raise DataContractError(
-                        f"iFinD 交易日历返回范围外日期：{trading_date.isoformat()}"
-                    )
-                parsed.append(trading_date)
-            if len(parsed) != len(set(parsed)):
-                raise DataContractError("iFinD 交易日历包含重复日期")
-            return sorted(parsed)
-
-        return self._execute(
-            "THS_Date_Query",
-            query_calendar,
-            parse_calendar,
-            requested_items=1,
-        )
-
-    def fetch_csi300_universe(self) -> pd.DataFrame:
-        if not self._logged_in or self._sdk is None:
-            raise StockUpdateError("iFinD 尚未登录")
-
-        def query_universe():
-            return self._sdk["universe"]("沪深300成分股", "stock")
-
-        def parse_universe(result):
-            error_code = int(getattr(result, "errorcode", -1))
-            if error_code != 0:
-                raise StockUpdateError(
-                    f"iFinD 沪深300成分查询失败（{error_code}）：{getattr(result, 'errmsg', '未知错误')}",
-                    error_code=error_code,
-                )
-            frame = getattr(result, "data", None)
-            required = {"股票代码", "股票简称"}
-            if not isinstance(frame, pd.DataFrame) or not required.issubset(frame.columns):
-                raise DataContractError("iFinD 沪深300成分结果缺少股票代码或股票简称")
-            normalized = frame[["股票代码", "股票简称"]].rename(
-                columns={"股票代码": "security_code", "股票简称": "security_name"}
-            )
-            normalized["security_code"] = normalized["security_code"].astype(str).str.upper()
-            normalized["security_name"] = normalized["security_name"].astype(str).str.strip()
-            if normalized["security_code"].duplicated().any():
-                raise DataContractError("iFinD 沪深300成分结果包含重复证券")
-            valid_codes = normalized["security_code"].str.fullmatch(r"\d{6}\.(SH|SZ)")
-            if not valid_codes.all() or len(normalized) != 300:
-                raise DataContractError(
-                    f"iFinD 沪深300成分合同异常：rows={len(normalized)}, invalid={int((~valid_codes).sum())}"
-                )
-            return normalized.sort_values("security_code").reset_index(drop=True)
-
-        return self._execute(
-            "THS_WCQuery",
-            query_universe,
-            parse_universe,
-            requested_items=1,
-        )
-
-    def fetch(
-        self,
-        codes: list[str],
-        start: date,
-        end: date,
-        attempt: int = 1,
-        max_attempts: int = 1,
-    ) -> pd.DataFrame:
-        if not self._logged_in or self._sdk is None:
-            raise StockUpdateError("iFinD 尚未登录")
-        def query_history():
-            return self._sdk["history"](
-                ",".join(codes),
-                INDICATORS,
-                self.history_params,
-                start.isoformat(),
-                end.isoformat(),
-                "format:dataframe",
-            )
-
-        def parse_history(result):
-            error_code = int(getattr(result, "errorcode", -1))
-            if error_code != 0:
-                raise StockUpdateError(
-                    f"iFinD 日线查询失败（{error_code}）：{getattr(result, 'errmsg', '未知错误')}",
-                    error_code=error_code,
-                )
-            return normalize_daily_frame(result.data)
-
-        return self._execute(
-            "THS_HD",
-            query_history,
-            parse_history,
-            requested_items=len(codes),
-            first_attempt=attempt,
-            max_attempts=max_attempts,
-        )
-
-    def logout(self) -> None:
-        if self._logged_in and self._owns_login and self._sdk is not None:
-            started_at = monotonic()
-            try:
-                result = int(
-                    self.runner.call(
-                        self._sdk["logout"],
-                        self.settings.ifind_timeout_seconds,
-                    )
-                )
-            except Exception as exc:
-                self.observer.record(operation="THS_iFinDLogout", status="error", started_at=started_at, error=exc)
-            else:
-                self.observer.record(
-                    operation="THS_iFinDLogout",
-                    status="success" if result == 0 else "error",
-                    started_at=started_at,
-                    error_code=result if result != 0 else None,
-                    error=f"iFinD 注销失败（{result}）" if result != 0 else None,
-                )
-        self._logged_in = False
-        self._owns_login = False
-
-
 @dataclass(frozen=True)
 class UpdatePlan:
     start_date: date
@@ -655,6 +342,21 @@ class StockDataUpdater:
 
     @staticmethod
     def _latest_dates(conn: sqlite3.Connection, tables: list[str]) -> dict[str, date]:
+        status_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='market_data_status'"
+        ).fetchone()
+        if status_table:
+            rows = conn.execute(
+                "SELECT security_code, latest_date FROM market_data_status "
+                "WHERE status='ready' AND latest_date IS NOT NULL"
+            ).fetchall()
+            cached = {
+                str(row[0]): date.fromisoformat(str(row[1]))
+                for row in rows
+            }
+            table_codes = {table_to_code(table) for table in tables}
+            if table_codes and table_codes.issubset(cached):
+                return {code: cached[code] for code in table_codes}
         latest: dict[str, date] = {}
         for table in tables:
             value = conn.execute(f'SELECT MAX(time) FROM "{table}"').fetchone()[0]
@@ -696,6 +398,22 @@ class StockDataUpdater:
     def initialize_schema(self) -> None:
         with self.connect() as conn:
             self._initialize_journal(conn)
+            tables = self._stock_tables(conn)
+            existing = {
+                row[0]
+                for row in conn.execute("SELECT security_code FROM market_data_status")
+            }
+            missing = [table for table in tables if table_to_code(table) not in existing]
+            initialized_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+            rows = []
+            for table in missing:
+                latest = conn.execute(f'SELECT MAX(time) FROM "{table}"').fetchone()[0]
+                if latest:
+                    rows.append((table_to_code(table), latest, initialized_at, "ready"))
+            conn.executemany(
+                "INSERT OR REPLACE INTO market_data_status VALUES (?, ?, ?, ?)",
+                rows,
+            )
 
     @staticmethod
     def _initialize_journal(conn: sqlite3.Connection) -> None:
@@ -750,6 +468,20 @@ class StockDataUpdater:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_data_quality_issues_run "
             "ON data_quality_issues(run_id, security_code)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_data_status (
+                security_code TEXT PRIMARY KEY,
+                latest_date TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                status TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_market_data_status_latest "
+            "ON market_data_status(status, latest_date)"
         )
 
     @staticmethod
@@ -825,6 +557,22 @@ class StockDataUpdater:
             )
             inserted += conn.total_changes - before
             latest[code] = newest
+            conn.execute(
+                """
+                INSERT INTO market_data_status (
+                    security_code, latest_date, updated_at, status
+                ) VALUES (?, ?, ?, 'ready')
+                ON CONFLICT(security_code) DO UPDATE SET
+                    latest_date=excluded.latest_date,
+                    updated_at=excluded.updated_at,
+                    status='ready'
+                """,
+                (
+                    code,
+                    newest.isoformat(),
+                    datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+                ),
+            )
         return inserted
 
     def update(

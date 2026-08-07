@@ -18,6 +18,8 @@ from app.core.primitives import (
     period_return,
 )
 from app.quant.factors import source_fingerprint
+from app.quant.factor_catalog import alpha158_summary, decorate_factor
+from app.quant.simple_research import SimpleResearchCatalog
 from app.research.store import utc_now
 from app.quant.store import QuantStore
 
@@ -204,6 +206,66 @@ class FactorLabService:
         if hasattr(store, "migrate_legacy"):
             store.migrate_legacy("0018_split_factor_lab_database", FACTOR_LAB_TABLES)
         self._seed_catalog()
+        apply_migration(
+            store.connect,
+            "0026_factor_catalog_cleanup",
+            self._cleanup_legacy_catalog,
+        )
+        self.simple_catalog = SimpleResearchCatalog(store)
+        self.simple_catalog.sync_from_legacy()
+
+    def _cleanup_legacy_catalog(self) -> None:
+        """Remove disposable UI experiments while preserving referenced history."""
+        disposable_ids = ("30d", "3d", "bodong")
+        reference_tables = (
+            "factor_set_member", "factor_lab_value", "factor_evaluation_metric",
+            "factor_backtest_run", "factor_release_candidate", "factor_release_review",
+        )
+        with self.store.connect() as conn:
+            existing_tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            for factor_id in disposable_ids:
+                referenced = any(
+                    conn.execute(
+                        f"SELECT 1 FROM {table} WHERE factor_id=? LIMIT 1", (factor_id,)
+                    ).fetchone()
+                    for table in reference_tables if table in existing_tables
+                )
+                version = conn.execute(
+                    "SELECT version, lifecycle_status FROM factor_version "
+                    "WHERE factor_id=? ORDER BY version DESC LIMIT 1",
+                    (factor_id,),
+                ).fetchone()
+                if version is None:
+                    continue
+                if not referenced:
+                    conn.execute("DELETE FROM factor_version WHERE factor_id=?", (factor_id,))
+                    conn.execute("DELETE FROM factor_definition WHERE factor_id=?", (factor_id,))
+                    continue
+                if version["lifecycle_status"] == "deprecated":
+                    continue
+                now = utc_now()
+                conn.execute(
+                    "UPDATE factor_version SET lifecycle_status='deprecated', status_changed_at=? "
+                    "WHERE factor_id=? AND version=?",
+                    (now, factor_id, version["version"]),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO factor_release_review (
+                        review_id, factor_id, factor_version, from_status, to_status,
+                        reviewer, note, created_at
+                    ) VALUES (?, ?, ?, ?, 'deprecated', 'system', ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()), factor_id, version["version"],
+                        version["lifecycle_status"],
+                        "历史临时因子命名不规范；保留评价与回测证据，仅退出活动目录。", now,
+                    ),
+                )
 
     def _create_schema(self) -> None:
         with self.store.connect() as conn:
@@ -507,7 +569,7 @@ class FactorLabService:
                 """,
                 params,
             ).fetchall()
-        return [_decoded(row) for row in rows]
+        return [decorate_factor(_decoded(row)) for row in rows]
 
     def create_factor(
         self, *, factor_id: str, name: str, description: str, template_id: str,
@@ -565,6 +627,7 @@ class FactorLabService:
                 self.universe, "T日收盘后", "历史不足则缺失", "draft",
                 ["评价结果只用于因子研究，不自动进入模型、候选池或交易。"], now,
             )
+        self.simple_catalog.sync_from_legacy()
         return next(item for item in self.list_factors() if item["factor_id"] == factor_id)
 
     def change_status(
@@ -599,6 +662,7 @@ class FactorLabService:
                 """,
                 (str(uuid.uuid4()), factor_id, version, current, to_status, reviewer, note, now),
             )
+        self.simple_catalog.sync_from_legacy()
         return next(item for item in self.list_factors() if item["factor_id"] == factor_id)
 
     def _snapshot_factors(self) -> list[dict]:
@@ -813,6 +877,13 @@ class FactorLabService:
             "factor_count": len(factors),
             "status_counts": counts,
             "template_count": len(FORMULA_TEMPLATES),
+            "strategy_compatible_count": sum(
+                1 for factor in factors if factor["strategy_compatible"]
+            ),
+            "strategy_eligible_count": sum(
+                1 for factor in factors if factor["strategy_eligible"]
+            ),
+            "alpha158": alpha158_summary(),
             "latest_snapshot": self.latest_snapshot(),
             "current_model_binding": dict(binding) if binding else None,
             "data_contract": {

@@ -1,0 +1,17 @@
+{
+  "skill_name": "stock-data-qfq-db",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "用 000001.SZ 截至 2026-07-31 的前复权数据计算 20 日收益率，并说明数据来源。",
+      "expected_output": "先校验构建元数据，再执行带日期上限的只读查询，明确 adjustment=forward 和实际样本范围。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "使用当前前复权数据库做 2021-2025 沪深300历史回测。",
+      "expected_output": "指出 price_universe_membership 不是历史成分表，要求结合 stock_pool.db 的日期化快照，避免幸存者偏差。",
+      "files": []
+    }
+  ]
+}

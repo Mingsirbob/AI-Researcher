@@ -1,12 +1,8 @@
 import sqlite3
 from datetime import date, datetime
-from types import SimpleNamespace
-
 import pandas as pd
 
-from app.core.config import Settings
 from app.market.updater import (
-    IFindDailyClient,
     StockDataUpdater,
     default_end_date,
     normalize_daily_frame,
@@ -43,27 +39,6 @@ def test_default_end_date_waits_until_evening():
     assert default_end_date(evening) == date(2026, 7, 21)
 
 
-def test_ifind_daily_client_reads_official_trading_calendar(tmp_path):
-    captured = {}
-
-    def fake_calendar(*args):
-        captured["args"] = args
-        return SimpleNamespace(
-            errorcode=0,
-            data="2026-07-17,2026-07-20,2026-07-21",
-            time=["2026-07-17", "2026-07-20", "2026-07-21"],
-        )
-
-    client = IFindDailyClient(Settings(state_db=tmp_path / "state.db"))
-    client._sdk = {"calendar": fake_calendar}
-    client._logged_in = True
-
-    result = client.fetch_trading_dates(date(2026, 7, 17), date(2026, 7, 21))
-
-    assert captured["args"][:2] == ("SSE", "dateType:0")
-    assert result == [date(2026, 7, 17), date(2026, 7, 20), date(2026, 7, 21)]
-
-
 def test_update_plan_reports_pending_securities_and_market_trading_day_gap(tmp_path):
     db_path = tmp_path / "stocks.db"
     create_stock_db(db_path)
@@ -91,72 +66,6 @@ def test_normalize_daily_frame_requires_contract():
         assert "缺少字段" in str(exc)
     else:
         raise AssertionError("缺少字段时应拒绝更新")
-
-
-def test_ifind_daily_client_requests_unadjusted_prices_with_empty_params(tmp_path):
-    captured = {}
-
-    def fake_history(*args):
-        captured["args"] = args
-        return SimpleNamespace(
-            errorcode=0,
-            data=pd.DataFrame(
-                [
-                    {
-                        "time": "2026-07-20",
-                        "thscode": "300750.SZ",
-                        "open": 354.0,
-                        "high": 377.6,
-                        "low": 353.8,
-                        "close": 376.43,
-                        "vwap": 371.34,
-                        "volume": 44790768,
-                    }
-                ]
-            ),
-        )
-
-    client = IFindDailyClient(Settings(state_db=tmp_path / "state.db"))
-    client._sdk = {"history": fake_history}
-    client._logged_in = True
-    frame = client.fetch(["300750.SZ"], date(2026, 7, 20), date(2026, 7, 20))
-
-    assert captured["args"][2] == ""
-    assert frame.iloc[0]["close"] == 376.43
-
-
-def test_ifind_daily_client_maps_adjustment_contracts(tmp_path):
-    captured = []
-
-    def fake_history(*args):
-        captured.append(args[2])
-        return SimpleNamespace(
-            errorcode=0,
-            data=pd.DataFrame(
-                [
-                    {
-                        "time": "2026-07-20",
-                        "thscode": "300750.SZ",
-                        "open": 354.0,
-                        "high": 377.6,
-                        "low": 353.8,
-                        "close": 376.43,
-                        "vwap": 371.34,
-                        "volume": 44790768,
-                    }
-                ]
-            ),
-        )
-
-    for adjustment in ("backward", "forward"):
-        client = IFindDailyClient(
-            Settings(state_db=tmp_path / f"{adjustment}.db"), adjustment=adjustment
-        )
-        client._sdk = {"history": fake_history}
-        client._logged_in = True
-        client.fetch(["300750.SZ"], date(2026, 7, 20), date(2026, 7, 20))
-
-    assert captured == ["CPS:1", "CPS:2"]
 
 
 def test_incremental_update_is_append_only_and_idempotent(tmp_path):
@@ -194,9 +103,13 @@ def test_incremental_update_is_append_only_and_idempotent(tmp_path):
         ).fetchone()[0]
         count = conn.execute('SELECT COUNT(*) FROM "stock_000001_SZ"').fetchone()[0]
         journal = conn.execute("SELECT status, adjustment FROM data_update_runs").fetchone()
+        sync_status = conn.execute(
+            "SELECT latest_date, status FROM market_data_status WHERE security_code='000001.SZ'"
+        ).fetchone()
     assert original == 10.5
     assert count == 2
     assert journal == ("success", "unadjusted")
+    assert sync_status == ("2026-07-20", "ready")
 
     repeated = updater.update(date(2026, 7, 20), batch_size=2, retry_delay=0)
     assert repeated["status"] == "up_to_date"

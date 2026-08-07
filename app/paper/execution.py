@@ -2,6 +2,24 @@ from __future__ import annotations
 
 from .context import *  # noqa: F403
 from .context import _normalize_paper_quote_code
+from zoneinfo import ZoneInfo
+
+
+def _market_rules(config: dict | None = None) -> ChinaAMarketRules:
+    values = config or {}
+    return ChinaAMarketRules(ChinaAConfig(
+        commission_rate=float(values.get("commission_rate", COMMISSION_RATE)),
+        minimum_commission=float(
+            values.get("minimum_commission", values.get("min_commission", MIN_COMMISSION))
+        ),
+        stamp_duty_rate=float(
+            values.get("stamp_duty_rate", values.get("sell_stamp_duty_rate", SELL_STAMP_DUTY_RATE))
+        ),
+        transfer_fee_rate=float(values.get("transfer_fee_rate", 0.00001)),
+        slippage_rate=float(values.get("slippage_rate", SLIPPAGE_RATE)),
+        lot_size=int(values.get("lot_size", 100)),
+        max_volume_participation=float(values.get("max_volume_participation", 0.1)),
+    ))
 
 
 class PaperExecutionMixin:
@@ -25,7 +43,11 @@ class PaperExecutionMixin:
                 return row["time"], float(value)
         return None
 
-    def _execution_quote(self, code: str, proposal_as_of: str, execution_date: str, side: str) -> tuple[tuple[str, float] | None, str | None]:
+    def _execution_quote(
+        self, code: str, proposal_as_of: str, execution_date: str, side: str,
+        config: dict | None = None,
+    ) -> tuple[tuple[str, float] | None, str | None]:
+        rules = _market_rules(config)
         try:
             rows = self.repository.get_history(code, start=proposal_as_of, end=execution_date, limit=3000)
         except KeyError:
@@ -55,18 +77,23 @@ class PaperExecutionMixin:
                 continue
             one_price = abs(high - low) <= max(abs(close or open_price), 1.0) * 1e-8
             if one_price and previous_close:
-                if side == "buy" and open_price > previous_close:
-                    last_reason = "one_price_limit_up"
-                    previous_close = close
-                    continue
-                if side == "sell" and open_price < previous_close:
-                    last_reason = "one_price_limit_down"
+                blocked = rules.tradability_reason(
+                    security_code=code,
+                    side=side,
+                    row=dict(row),
+                    previous_close=previous_close,
+                    trading_date=row["time"],
+                )
+                if blocked in {"limit_up", "limit_down"}:
+                    last_reason = f"one_price_{blocked}"
                     previous_close = close
                     continue
             return (row["time"], open_price), None
         return None, last_reason
 
-    def _realtime_scope(self, account: dict) -> dict[str, list[str]]:
+    def _realtime_scope(
+        self, account: dict, approved_run_id: str | None = None
+    ) -> dict[str, list[str]]:
         scope: dict[str, list[str]] = {
             code: ["benchmark_comparison"] for code in PAPER_BENCHMARKS
         }
@@ -76,10 +103,15 @@ class PaperExecutionMixin:
                 "SELECT security_code FROM paper_position WHERE account_id=? AND quantity>0",
                 (account["account_id"],),
             ).fetchall()
-            pending = conn.execute(
-                "SELECT DISTINCT security_code FROM paper_order WHERE account_id=? AND status='approved'",
-                (account["account_id"],),
-            ).fetchall()
+            pending_sql = (
+                "SELECT DISTINCT security_code FROM paper_order "
+                "WHERE account_id=? AND status='approved'"
+            )
+            pending_params: list[str] = [account["account_id"]]
+            if approved_run_id:
+                pending_sql += " AND run_id=?"
+                pending_params.append(approved_run_id)
+            pending = conn.execute(pending_sql, pending_params).fetchall()
         for row in positions:
             scope.setdefault(row["security_code"], []).append("position")
         for row in pending:
@@ -121,11 +153,13 @@ class PaperExecutionMixin:
         }
         return normalized, []
 
-    def refresh_realtime_quotes(self, account_id: str | None = None) -> dict:
+    def refresh_realtime_quotes(
+        self, account_id: str | None = None, *, approved_run_id: str | None = None
+    ) -> dict:
         if self.quote_provider is None:
             raise RuntimeError("实时行情服务未配置")
         account = self.account(account_id) if account_id else self.default_account()
-        scope = self._realtime_scope(account)
+        scope = self._realtime_scope(account, approved_run_id)
         received_at = utc_now()
         raw_quotes = self.quote_provider.get_realtime_quotes(list(scope))
         saved, invalid = [], []
@@ -170,14 +204,21 @@ class PaperExecutionMixin:
         params: list[Any] = [account_id]
         code_filter = ""
         if codes:
-            code_filter = f" AND q.security_code IN ({','.join('?' for _ in codes)})"
+            code_filter = f" AND security_code IN ({','.join('?' for _ in codes)})"
             params.extend(codes)
         with self.paper_store.connect() as conn:
             rows = conn.execute(
-                f"""SELECT q.* FROM paper_realtime_quote q
-                WHERE q.account_id=? {code_filter}
-                  AND q.received_at=(SELECT MAX(q2.received_at) FROM paper_realtime_quote q2
-                                     WHERE q2.account_id=q.account_id AND q2.security_code=q.security_code)
+                f"""SELECT q.*
+                FROM paper_realtime_quote q
+                JOIN (
+                    SELECT account_id, security_code, MAX(received_at) AS received_at
+                    FROM paper_realtime_quote
+                    WHERE account_id=? {code_filter}
+                    GROUP BY account_id, security_code
+                ) latest
+                  ON latest.account_id=q.account_id
+                 AND latest.security_code=q.security_code
+                 AND latest.received_at=q.received_at
                 ORDER BY q.security_code""",
                 params,
             ).fetchall()
@@ -293,6 +334,16 @@ class PaperExecutionMixin:
             ).fetchone()
         return self.run(row["run_id"]) if row else None
 
+    def _latest_active_run_id(self, account_id: str) -> str | None:
+        with self.paper_store.connect() as conn:
+            row = conn.execute(
+                """SELECT run_id FROM paper_daily_run
+                   WHERE account_id=? AND status<>'superseded'
+                   ORDER BY as_of DESC, created_at DESC LIMIT 1""",
+                (account_id,),
+            ).fetchone()
+        return row["run_id"] if row else None
+
     def _supersede_prior_runs(
         self, account_id: str, as_of: str, active_run_id: str, strategy_version: str
     ) -> None:
@@ -304,12 +355,12 @@ class PaperExecutionMixin:
                    reviewed_at=COALESCE(reviewed_at, ?)
                    WHERE account_id=? AND run_id<>? AND status IN ('proposed','approved')
                      AND fill_date IS NULL
-                     AND run_id IN (SELECT run_id FROM paper_daily_run WHERE account_id=? AND as_of=?)""",
-                (f'已由 {strategy_version} 同日批次替代', now, account_id, active_run_id, account_id, as_of),
+                     AND run_id IN (SELECT run_id FROM paper_daily_run WHERE account_id=? AND as_of<=?)""",
+                (f'已由 {strategy_version} 最新批次替代', now, account_id, active_run_id, account_id, as_of),
             )
             conn.execute(
                 """UPDATE paper_daily_run SET status='superseded'
-                   WHERE account_id=? AND as_of=? AND run_id<>? AND status<>'completed'""",
+                   WHERE account_id=? AND as_of<=? AND run_id<>? AND status<>'completed'""",
                 (account_id, as_of, active_run_id),
             )
 
@@ -334,6 +385,42 @@ class PaperExecutionMixin:
             )
             item["orders"].append(decoded)
         return item
+
+    def order_ledger(self, account_id: str | None = None, limit: int = 500) -> dict:
+        account = self.account(account_id) if account_id else self.default_account()
+        with self.paper_store.connect() as conn:
+            latest_run = conn.execute(
+                """SELECT run_id, as_of FROM paper_daily_run
+                   WHERE account_id=? AND status<>'superseded'
+                   ORDER BY as_of DESC, created_at DESC LIMIT 1""",
+                (account["account_id"],),
+            ).fetchone()
+            rows = conn.execute(
+                """SELECT o.*, r.as_of, r.status AS run_status, r.strategy_version
+                   FROM paper_order o
+                   JOIN paper_daily_run r ON r.run_id=o.run_id
+                   WHERE o.account_id=?
+                   ORDER BY r.as_of DESC,
+                            CASE o.side WHEN 'sell' THEN 0 ELSE 1 END,
+                            o.created_at DESC
+                   LIMIT ?""",
+                (account["account_id"], limit),
+            ).fetchall()
+        metadata = self._security_metadata([row["security_code"] for row in rows])
+        items = []
+        for row in rows:
+            item = self._decode_json(dict(row), "reason")
+            item["security_name"] = (
+                metadata.get(item["security_code"], {}).get("security_name")
+                or item["security_code"]
+            )
+            items.append(item)
+        return {
+            "account_id": account["account_id"],
+            "latest_run_id": latest_run["run_id"] if latest_run else None,
+            "latest_as_of": latest_run["as_of"] if latest_run else None,
+            "items": items,
+        }
 
     def review_order(self, order_id: str, decision: str, reviewer: str, note: str) -> dict:
         status = "approved" if decision == "approve" else "rejected"
@@ -368,12 +455,16 @@ class PaperExecutionMixin:
 
     def _fill_order(self, account_id: str, order: dict, fill_date: str, open_price: float,
                     execution_quote_id: str | None = None) -> tuple[dict | None, str | None]:
-        fill_price = open_price * (1 + SLIPPAGE_RATE if order["side"] == "buy" else 1 - SLIPPAGE_RATE)
+        with self.paper_store.connect() as conn:
+            config_row = conn.execute(
+                "SELECT config_json FROM paper_daily_run WHERE run_id=?", (order["run_id"],)
+            ).fetchone()
+        config = json.loads(config_row["config_json"]) if config_row else {}
+        rules = _market_rules(config)
+        fill_price = rules.execution_price(order["side"], open_price)
         quantity = int(order["quantity"])
         gross = fill_price * quantity
-        fees = max(MIN_COMMISSION, gross * COMMISSION_RATE)
-        if order["side"] == "sell":
-            fees += gross * SELL_STAMP_DUTY_RATE
+        fees = rules.fee(order["side"], quantity, fill_price)
         with self.paper_store.connect() as conn:
             current = conn.execute(
                 "SELECT * FROM paper_position WHERE account_id=? AND security_code=?",
@@ -383,10 +474,6 @@ class PaperExecutionMixin:
                 "SELECT * FROM paper_account WHERE account_id=?", (account_id,)
             ).fetchone()
             if order["side"] == "buy":
-                config_row = conn.execute(
-                    "SELECT config_json FROM paper_daily_run WHERE run_id=?", (order["run_id"],)
-                ).fetchone()
-                config = json.loads(config_row["config_json"]) if config_row else {}
                 max_positions = int(config.get("max_positions") or 0)
                 is_new_position = current is None or int(current["quantity"] or 0) <= 0
                 position_count = conn.execute(
@@ -447,6 +534,7 @@ class PaperExecutionMixin:
     def settle(self, *, execution_date: str, account_id: str | None = None) -> dict:
         date.fromisoformat(execution_date)
         account = self.account(account_id) if account_id else self.default_account()
+        active_run_id = self._latest_active_run_id(account["account_id"])
         filled, skipped, turnover = [], [], 0.0
         with self.paper_store.connect() as conn:
             conn.execute(
@@ -454,15 +542,16 @@ class PaperExecutionMixin:
                 (utc_now(), account["account_id"], execution_date),
             )
             rows = conn.execute(
-                """SELECT o.*, r.as_of FROM paper_order o JOIN paper_daily_run r ON r.run_id=o.run_id
-                WHERE o.account_id=? AND o.status='approved' AND r.as_of<?
+                """SELECT o.*, r.as_of, r.config_json FROM paper_order o JOIN paper_daily_run r ON r.run_id=o.run_id
+                WHERE o.account_id=? AND o.run_id=? AND o.status='approved' AND r.as_of<?
                 ORDER BY CASE o.side WHEN 'sell' THEN 0 ELSE 1 END, o.created_at""",
-                (account["account_id"], execution_date),
+                (account["account_id"], active_run_id, execution_date),
             ).fetchall()
         for raw in rows:
             order = dict(raw)
             price_item, execution_reason = self._execution_quote(
-                order["security_code"], order["as_of"], execution_date, order["side"]
+                order["security_code"], order["as_of"], execution_date, order["side"],
+                json.loads(order["config_json"]),
             )
             if not price_item:
                 skipped.append({"order_id": order["order_id"], "reason": execution_reason})
@@ -476,14 +565,46 @@ class PaperExecutionMixin:
             filled.append(fill)
         account = self.account(account["account_id"])
         nav = self._mark_nav(account, execution_date, turnover)
-        return {"account": account, "filled": filled, "skipped": skipped, "nav": nav}
+        return {
+            "account": account, "run_id": active_run_id,
+            "filled": filled, "skipped": skipped, "nav": nav,
+        }
 
-    def settle_realtime(self, account_id: str | None = None) -> dict:
-        refresh = self.refresh_realtime_quotes(account_id)
-        account = self.account(refresh["account_id"])
+    def settle_realtime(
+        self, account_id: str | None = None, *, now: datetime | None = None
+    ) -> dict:
+        shanghai_now = now or datetime.now(ZoneInfo("Asia/Shanghai"))
+        if shanghai_now.tzinfo is None:
+            shanghai_now = shanghai_now.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        else:
+            shanghai_now = shanghai_now.astimezone(ZoneInfo("Asia/Shanghai"))
+        current_time = shanghai_now.time().replace(tzinfo=None)
+        morning_open = (
+            datetime.strptime("09:30", "%H:%M").time()
+            <= current_time
+            <= datetime.strptime("11:30", "%H:%M").time()
+        )
+        afternoon_open = (
+            datetime.strptime("13:00", "%H:%M").time()
+            <= current_time
+            <= datetime.strptime("15:00", "%H:%M").time()
+        )
+        if not (morning_open or afternoon_open):
+            raise ValueError(
+                "实时模拟撮合仅允许交易日 09:30–11:30、13:00–15:00"
+            )
+        account = self.account(account_id) if account_id else self.default_account()
+        active_run_id = self._latest_active_run_id(account["account_id"])
+        refresh = self.refresh_realtime_quotes(
+            account["account_id"], approved_run_id=active_run_id
+        )
         quotes = {item["security_code"]: item for item in refresh["quotes"]}
+        if not quotes:
+            raise ValueError("实时行情为空，无法执行模拟撮合")
         trading_dates = [quote["trading_date"] for quote in quotes.values()]
-        execution_date = max(trading_dates) if trading_dates else date.today().isoformat()
+        execution_date = max(trading_dates)
+        if execution_date != shanghai_now.date().isoformat():
+            raise ValueError("当前不是可撮合交易日，实时行情日期与今日不一致")
         filled, skipped, turnover = [], [], 0.0
         with self.paper_store.connect() as conn:
             conn.execute(
@@ -492,11 +613,11 @@ class PaperExecutionMixin:
                 (utc_now(), account["account_id"], execution_date),
             )
             rows = conn.execute(
-                """SELECT o.*, r.as_of FROM paper_order o
+                """SELECT o.*, r.as_of, r.config_json FROM paper_order o
                 JOIN paper_daily_run r ON r.run_id=o.run_id
-                WHERE o.account_id=? AND o.status='approved'
+                WHERE o.account_id=? AND o.run_id=? AND o.status='approved'
                 ORDER BY CASE o.side WHEN 'sell' THEN 0 ELSE 1 END, o.created_at""",
-                (account["account_id"],),
+                (account["account_id"], active_run_id),
             ).fetchall()
         for raw in rows:
             order = dict(raw)
@@ -508,23 +629,32 @@ class PaperExecutionMixin:
             if fill_date <= order["as_of"]:
                 skipped.append({"order_id": order["order_id"], "reason": "no_later_trading_day"})
                 continue
-            market_open = datetime.fromisoformat(f"{fill_date}T09:30:00+08:00")
             reviewed_at = datetime.fromisoformat(order["reviewed_at"])
-            if reviewed_at >= market_open:
-                skipped.append({"order_id": order["order_id"], "reason": "approved_after_market_open"})
+            quote_time = datetime.fromisoformat(quote["quote_time"])
+            if reviewed_at > quote_time:
+                skipped.append({"order_id": order["order_id"], "reason": "quote_before_approval"})
                 continue
             if quote["volume"] <= 0:
                 skipped.append({"order_id": order["order_id"], "reason": "suspended_or_preopen_quote"})
                 continue
+            rules = _market_rules(json.loads(order["config_json"]))
             one_price = abs(quote["high"] - quote["low"]) <= max(abs(quote["latest"]), 1.0) * 1e-8
-            if one_price and order["side"] == "buy" and quote["open"] > quote["previous_close"]:
-                skipped.append({"order_id": order["order_id"], "reason": "one_price_limit_up"})
-                continue
-            if one_price and order["side"] == "sell" and quote["open"] < quote["previous_close"]:
-                skipped.append({"order_id": order["order_id"], "reason": "one_price_limit_down"})
-                continue
+            if one_price:
+                blocked = rules.tradability_reason(
+                    security_code=order["security_code"],
+                    side=order["side"],
+                    row={"open": quote["open"], "volume": quote["volume"]},
+                    previous_close=quote["previous_close"],
+                    trading_date=fill_date,
+                )
+                if blocked in {"limit_up", "limit_down"}:
+                    skipped.append({
+                        "order_id": order["order_id"],
+                        "reason": f"one_price_{blocked}",
+                    })
+                    continue
             fill, reason = self._fill_order(
-                account["account_id"], order, fill_date, quote["open"], quote["snapshot_id"]
+                account["account_id"], order, fill_date, quote["latest"], quote["snapshot_id"]
             )
             if reason:
                 skipped.append({"order_id": order["order_id"], "reason": reason})
@@ -533,4 +663,7 @@ class PaperExecutionMixin:
             filled.append(fill)
         account = self.account(account["account_id"])
         nav = self._mark_nav(account, execution_date, turnover, quotes)
-        return {"account": account, "filled": filled, "skipped": skipped, "nav": nav, "realtime": refresh}
+        return {
+            "account": account, "run_id": active_run_id,
+            "filled": filled, "skipped": skipped, "nav": nav, "realtime": refresh,
+        }

@@ -12,6 +12,7 @@ frontend/playwright-report/
 .mypy_cache/
 .ruff_cache/
 .uv-cache/
+example/
 
 # Runtime databases and SQLite sidecars
 data/*.db
@@ -22,6 +23,11 @@ data/documents/
 data/current_shadow/
 data/model_artifacts/
 data/backups/
+data/backtests
+data/pytest-*/
+data/test_tmp/
+data/strategy_runs/
+
 
 # Runtime output
 logs/

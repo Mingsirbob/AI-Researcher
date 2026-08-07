@@ -1,0 +1,17 @@
+{
+  "skill_name": "stock-data-db",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "检查 000408.SZ 的不复权行情是否更新到 2026-08-06，并返回最近 20 个交易日。",
+      "expected_output": "先检查 market_data_status，再通过只读方式查询对应证券表，并报告不复权口径、日期范围与行数。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "查看最近三次原始行情更新是否有失败证券或质量问题。",
+      "expected_output": "查询 data_update_runs 和 data_quality_issues，不修改数据库，并区分失败与质量隔离。",
+      "files": []
+    }
+  ]
+}

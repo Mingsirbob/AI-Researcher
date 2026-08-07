@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -284,6 +285,20 @@ class RealtimeProvider:
         } for code in codes if code in prices]
 
 
+def test_realtime_quote_latest_lookup_has_matching_index(tmp_path):
+    _, store = _service(tmp_path)
+
+    with store.connect() as conn:
+        columns = [
+            row[2]
+            for row in conn.execute(
+                "PRAGMA index_info('idx_paper_realtime_quote_latest')"
+            ).fetchall()
+        ]
+
+    assert columns == ["account_id", "security_code", "received_at"]
+
+
 def test_portfolio_planning_does_not_mutate_paper_account_state(tmp_path):
     service, store = _service(tmp_path)
     account = service.default_account()
@@ -455,7 +470,7 @@ def test_benchmark_comparison_uses_common_inception_and_aligned_nav_dates(tmp_pa
             {"thscode": code, "time": "2026-07-21", "close": 100.0},
             {"thscode": code, "time": "2026-07-22", "close": latest_closes[code]},
         ])
-    saved = service.save_benchmark_prices(account["account_id"], rows)
+    saved = service.save_benchmark_prices(rows)
     comparison = service.dashboard(account["account_id"], "2026-07-20")["benchmark_comparison"]
 
     assert saved["rows_written"] == 18
@@ -489,7 +504,7 @@ def test_benchmark_comparison_adds_intraday_points_without_overwriting_daily_pri
             (account["account_id"],),
         )
     service._mark_nav(service.account(account["account_id"]), "2026-07-21")
-    service.save_benchmark_prices(account["account_id"], [
+    service.save_benchmark_prices([
         {"thscode": code, "time": trading_date, "close": close}
         for code in PAPER_BENCHMARKS
         for trading_date, close in (("2026-07-20", 100.0), ("2026-07-21", 100.5))
@@ -507,11 +522,9 @@ def test_benchmark_comparison_adds_intraday_points_without_overwriting_daily_pri
     assert {item["code"] for item in comparison["benchmarks"]} == set(PAPER_BENCHMARKS)
     assert all(item["points"][-1]["date"] == "2026-07-23" for item in comparison["benchmarks"])
     assert all(item["latest_source"] == "iFinD THS_RQ" for item in comparison["benchmarks"])
-    with store.connect() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM paper_benchmark_price WHERE account_id=?",
-            (account["account_id"],),
-        ).fetchone()[0] == 12
+    assert sum(
+        len(service.stock_pool_store.index_prices(code)) for code in PAPER_BENCHMARKS
+    ) == 12
 
 
 def test_benchmark_comparison_rejects_missing_inception_as_partial(tmp_path):
@@ -525,7 +538,7 @@ def test_benchmark_comparison_rejects_missing_inception_as_partial(tmp_path):
             (run["orders"][0]["order_id"],),
         )
     service._mark_nav(account, "2026-07-21")
-    service.save_benchmark_prices(account["account_id"], [
+    service.save_benchmark_prices([
         {"thscode": code, "time": "2026-07-21", "close": 100.0}
         for code in PAPER_BENCHMARKS
     ])
@@ -599,7 +612,7 @@ def test_execution_skips_suspended_day_and_waits_for_next_tradable_open(tmp_path
     assert resumed["filled"][0]["fill_date"] == "2026-07-22"
 
 
-def test_current_strategy_cancels_approved_unfilled_prior_version(tmp_path):
+def test_current_strategy_cancels_approved_unfilled_prior_run(tmp_path):
     service, store = _service(tmp_path)
     current = service.create_daily_run(
         as_of="2026-07-20", account_id=None, top_n=1, hold_rank_buffer=30
@@ -607,8 +620,8 @@ def test_current_strategy_cancels_approved_unfilled_prior_version(tmp_path):
     with store.connect() as conn:
         conn.execute(
             """INSERT INTO paper_daily_run VALUES
-            ('legacy-run', ?, '2026-07-20', 'factor-1', 'shadow-1', 'legacy-v1',
-             'awaiting_review', '{}', '{}', 'legacy-hash', '2026-07-20T09:00:00+00:00')""",
+            ('legacy-run', ?, '2026-07-19', 'factor-1', 'shadow-1', 'legacy-v1',
+             'awaiting_review', '{}', '{}', 'legacy-hash', '2026-07-19T09:00:00+00:00')""",
             (current["account_id"],),
         )
         conn.execute(
@@ -632,7 +645,7 @@ def test_current_strategy_cancels_approved_unfilled_prior_version(tmp_path):
     assert run_status == "superseded"
 
 
-def test_realtime_refresh_persists_quote_and_settles_at_official_open(tmp_path):
+def test_realtime_refresh_persists_quote_and_settles_latest_run_at_realtime_price(tmp_path):
     provider = RealtimeProvider()
     service, store = _service(tmp_path, provider)
     run = service.create_daily_run(
@@ -645,14 +658,35 @@ def test_realtime_refresh_persists_quote_and_settles_at_official_open(tmp_path):
             "UPDATE paper_order SET reviewed_at='2026-07-23T08:00:00+08:00' WHERE order_id=?",
             (order["order_id"],),
         )
+        conn.execute(
+            """INSERT INTO paper_daily_run VALUES
+            ('stale-run', ?, '2026-07-19', 'factor-1', 'shadow-1', 'stale-v1',
+             'approved_waiting_execution', '{}', '{}', 'stale-hash',
+             '2026-07-19T09:00:00+00:00')""",
+            (run["account_id"],),
+        )
+        conn.execute(
+            """INSERT INTO paper_order
+            (order_id, run_id, account_id, security_code, side, quantity, reference_price,
+             target_weight, reason_json, status, reviewer, review_note, reviewed_at, created_at)
+            VALUES ('stale-order','stale-run',?,'000002.SZ','buy',100,20,.1,'{}',
+                    'approved','human','旧批次','2026-07-19T10:00:00+08:00',
+                    '2026-07-19T09:00:00+00:00')""",
+            (run["account_id"],),
+        )
 
-    result = service.settle_realtime()
+    result = service.settle_realtime(now=datetime.fromisoformat("2026-07-23T10:05:00+08:00"))
 
     assert set(provider.requested) == {"000001.SZ", *PAPER_BENCHMARKS}
+    assert result["run_id"] == run["run_id"]
     assert result["filled"][0]["fill_date"] == "2026-07-23"
-    assert result["filled"][0]["fill_price"] > 13.0
+    assert result["filled"][0]["fill_price"] == pytest.approx(13.1 * 1.0005)
     assert result["filled"][0]["execution_quote_id"]
     assert service.run(run["run_id"])["status"] == "completed"
+    with store.connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM paper_order WHERE order_id='stale-order'"
+        ).fetchone()[0] == "approved"
     dashboard = service.dashboard(as_of="2026-07-22")
     position = dashboard["positions"][0]
     assert position["close"] == 13.1
@@ -666,7 +700,7 @@ def test_realtime_refresh_persists_quote_and_settles_at_official_open(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM paper_realtime_quote").fetchone()[0] == 7
 
 
-def test_realtime_settlement_rejects_order_approved_after_market_open(tmp_path):
+def test_realtime_settlement_fills_order_approved_after_market_open(tmp_path):
     provider = RealtimeProvider()
     service, store = _service(tmp_path, provider)
     run = service.create_daily_run(
@@ -680,11 +714,104 @@ def test_realtime_settlement_rejects_order_approved_after_market_open(tmp_path):
             (order["order_id"],),
         )
 
-    result = service.settle_realtime()
+    result = service.settle_realtime(now=datetime.fromisoformat("2026-07-23T10:05:00+08:00"))
+
+    assert len(result["filled"]) == 1
+    assert result["filled"][0]["fill_price"] == pytest.approx(13.1 * 1.0005)
+    assert result["skipped"] == []
+    assert service.run(run["run_id"])["orders"][0]["status"] == "filled"
+
+
+def test_realtime_settlement_rejects_quote_older_than_approval(tmp_path):
+    provider = RealtimeProvider(quote_time="2026-07-23 10:01:02+08:00")
+    service, store = _service(tmp_path, provider)
+    run = service.create_daily_run(
+        as_of="2026-07-20", account_id=None, top_n=1, hold_rank_buffer=30
+    )
+    order = run["orders"][0]
+    service.review_order(order["order_id"], "approve", "tester", "批准模拟订单")
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE paper_order SET reviewed_at='2026-07-23T10:02:00+08:00' WHERE order_id=?",
+            (order["order_id"],),
+        )
+
+    result = service.settle_realtime(
+        now=datetime.fromisoformat("2026-07-23T10:05:00+08:00")
+    )
 
     assert result["filled"] == []
-    assert result["skipped"][0]["reason"] == "approved_after_market_open"
+    assert result["skipped"][0]["reason"] == "quote_before_approval"
     assert service.run(run["run_id"])["orders"][0]["status"] == "approved"
+
+
+def test_realtime_settlement_rejects_after_market_close_before_refresh(tmp_path):
+    provider = RealtimeProvider()
+    service, _ = _service(tmp_path, provider)
+
+    with pytest.raises(ValueError, match="09:30–11:30、13:00–15:00"):
+        service.settle_realtime(now=datetime.fromisoformat("2026-07-23T15:01:00+08:00"))
+
+    assert provider.requested == []
+
+
+def test_realtime_settlement_rejects_during_lunch_break_before_refresh(tmp_path):
+    provider = RealtimeProvider()
+    service, _ = _service(tmp_path, provider)
+
+    with pytest.raises(ValueError, match="09:30–11:30、13:00–15:00"):
+        service.settle_realtime(now=datetime.fromisoformat("2026-07-23T12:00:00+08:00"))
+
+    assert provider.requested == []
+
+
+def test_order_ledger_returns_proposal_review_and_fill_history(tmp_path):
+    service, _ = _service(tmp_path)
+    run = service.create_daily_run(
+        as_of="2026-07-20", account_id=None, top_n=1, hold_rank_buffer=30
+    )
+    order = run["orders"][0]
+    service.review_order(order["order_id"], "approve", "tester", "人工批准")
+    service.settle(execution_date="2026-07-21")
+
+    ledger = service.order_ledger(run["account_id"])
+
+    assert ledger["latest_run_id"] == run["run_id"]
+    assert ledger["latest_as_of"] == "2026-07-20"
+    item = ledger["items"][0]
+    assert item["security_name"]
+    assert item["status"] == "filled"
+    assert item["reviewer"] == "tester"
+    assert item["fill_date"] == "2026-07-21"
+    assert item["fill_price"] is not None
+    assert item["fees"] is not None
+
+
+def test_legacy_automatic_unfilled_approval_returns_to_manual_review(tmp_path):
+    service, store = _service(tmp_path)
+    run = service.create_daily_run(
+        as_of="2026-07-20", account_id=None, top_n=1, hold_rank_buffer=30
+    )
+    order_id = run["orders"][0]["order_id"]
+    with store.connect() as conn:
+        conn.execute(
+            """UPDATE paper_order SET status='approved', reviewer='paper-auto-scheduler',
+               review_note='旧自动审批', reviewed_at='2026-07-20T18:10:00+08:00'
+               WHERE order_id=?""",
+            (order_id,),
+        )
+        conn.execute(
+            "DELETE FROM schema_migration WHERE migration_id='0030_manual_paper_approval'"
+        )
+
+    rebuilt = PaperTradingService(
+        service.repository, store, quant_store=service.quant_store
+    )
+    order = rebuilt.run(run["run_id"])["orders"][0]
+
+    assert order["status"] == "proposed"
+    assert order["reviewer"] is None
+    assert order["reviewed_at"] is None
 
 
 def test_missing_research_assessment_defers_new_position(tmp_path):
@@ -730,7 +857,7 @@ def test_reduce_assessment_halves_pre_research_weight(tmp_path):
     assert candidate["target_weight"] == candidate["pre_research_weight"] * 0.5
 
 
-def test_holding_outside_rank_buffer_is_evaluated_and_preserved(tmp_path):
+def test_holding_outside_rank_buffer_is_exited_for_higher_ranked_name(tmp_path):
     service, store = _service(tmp_path)
     account = _insert_position(service, store)
 
@@ -739,12 +866,12 @@ def test_holding_outside_rank_buffer_is_evaluated_and_preserved(tmp_path):
     )
 
     selected = run["market_summary"]["top_candidates"]
-    assert [item["security_code"] for item in selected] == ["000002.SZ"]
+    assert [item["security_code"] for item in selected] == ["000001.SZ"]
     assert run["market_summary"]["holding_control"]["evaluated"] == 1
-    assert not any(
-        order["side"] == "buy" and order["security_code"] == "000001.SZ"
-        for order in run["orders"]
-    )
+    assert run["market_summary"]["holding_control"]["rank_exit_codes"] == ["000002.SZ"]
+    assert [(item["side"], item["security_code"]) for item in run["orders"]] == [
+        ("sell", "000002.SZ"), ("buy", "000001.SZ")
+    ]
 
 
 def test_deferred_holding_is_frozen_and_blocks_new_entry_slot(tmp_path):
@@ -753,7 +880,7 @@ def test_deferred_holding_is_frozen_and_blocks_new_entry_slot(tmp_path):
     _set_assessment_signal(store, "000002.SZ", "defer")
 
     run = service.create_daily_run(
-        as_of="2026-07-20", account_id=account["account_id"], top_n=1, hold_rank_buffer=1
+        as_of="2026-07-20", account_id=account["account_id"], top_n=1, hold_rank_buffer=2
     )
 
     control = run["market_summary"]["holding_control"]
@@ -761,6 +888,49 @@ def test_deferred_holding_is_frozen_and_blocks_new_entry_slot(tmp_path):
     assert control["occupied_slots"] == 1
     assert run["orders"] == []
     assert run["status"] == "completed"
+
+
+def test_dynamic_exposure_uses_signal_universe_breadth(tmp_path):
+    service, _ = _service(tmp_path)
+    account = service.default_account()
+    strategy = {
+        "strategy_id": "dynamic-test",
+        "version": "1",
+        "signal_source": "current_shadow",
+        "research_enabled": True,
+        "config": {
+            "exposure_mode": "dynamic",
+            "minimum_exposure": 0.2,
+            "neutral_exposure": 0.5,
+            "maximum_exposure": 0.8,
+            "bullish_breadth_threshold": 0.6,
+            "bearish_breadth_threshold": 0.4,
+            "high_volatility_threshold": 0.5,
+            "approval_mode": "automatic",
+            "auto_run": True,
+            "run_time": "18:10",
+        },
+    }
+
+    plan = service.portfolio_decision.build_plan(
+        account=account,
+        positions=[],
+        as_of="2026-07-20",
+        run_id="dynamic-plan",
+        created_at="2026-07-20T18:10:00+08:00",
+        top_n=1,
+        hold_rank_buffer=2,
+        target_gross_exposure=0.5,
+        max_position_weight=0.8,
+        max_industry_weight=0.8,
+        max_pair_correlation=0.85,
+        strategy=strategy,
+    )
+
+    assert plan["config"]["exposure_mode"] == "dynamic"
+    assert plan["config"]["target_gross_exposure"] == 0.8
+    assert plan["market_summary"]["exposure_control"]["regime"] == "bullish"
+    assert plan["config"]["market_rules_version"] == "china-a-v1"
 
 
 def test_t1_holding_exit_is_proposed_and_releases_slot_before_buy(tmp_path):

@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 from app.research.announcements import AnnouncementPipeline
 from app.core.config import settings
 from app.market.repository import normalize_code
-from app.integrations.ifind import IFindService
+from app.data.ifind import IFindDataLayer
 from app.research.store import ResearchStore
 
 
@@ -41,7 +41,7 @@ def main() -> int:
         return 0
     if store.security(args.code) is None:
         store.bootstrap_securities(settings.stock_db)
-    ifind = IFindService(settings)
+    ifind = IFindDataLayer(settings)
     try:
         pipeline = AnnouncementPipeline(store, ifind)
         if args.reprocess:
@@ -57,7 +57,7 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "success" else 2
     finally:
-        ifind.logout()
+        ifind.close()
 
 
 if __name__ == "__main__":

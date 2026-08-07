@@ -2,9 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { Plus, Play, RefreshCw, Search, X } from "lucide-vue-next";
-import { api, openApiJsonBody } from "@/api/client";
+import { api, jsonBody, openApiJsonBody } from "@/api/client";
 import type { OpenApiSchema } from "@/api/client";
-import type { BenchmarkSeries, ChartSeries, DailyBatch, PaperTarget } from "@/api/types";
+import type { BenchmarkSeries, ChartSeries, DailyBatch, PaperOrder, PaperOrderLedger, PaperTarget } from "@/api/types";
 import { money, pct } from "@/lib/format";
 import { useUiStore } from "@/stores/ui";
 import PageHeader from "@/components/PageHeader.vue";
@@ -14,9 +14,8 @@ import PaperPerformanceSection from "./components/PaperPerformanceSection.vue";
 import PaperOrdersSection from "./components/PaperOrdersSection.vue";
 import PaperPositionsSection from "./components/PaperPositionsSection.vue";
 
-interface PaperOrder { order_id: string; security_code: string; security_name?: string; side: string; status: string; quantity: number; reference_price?: number; target_weight?: number; reason?: Record<string, unknown> }
 interface PaperPosition { security_code: string; security_name?: string; quantity: number; available_quantity: number; close?: number; previous_close?: number; average_cost: number; daily_pnl?: number; market_value?: number; weight?: number; unrealized_pnl?: number; unrealized_return?: number; risk_status?: string; risk_flags?: string[]; shadow_rank?: number }
-interface PaperRun { run_id: string; status: string; orders: PaperOrder[]; market_summary?: Record<string, unknown> }
+interface PaperRun { run_id: string; status: string; as_of?: string; orders: PaperOrder[]; market_summary?: Record<string, unknown> }
 interface Comparison {
   status?: string;
   as_of?: string;
@@ -28,20 +27,22 @@ interface Comparison {
   limitations?: string[];
 }
 interface PaperStrategy { strategy_id: string; version: string; name: string; description: string; signal_source: string; config: Record<string, unknown> }
-interface PaperAccount { account_id: string; name: string; initial_cash: number; cash: number; benchmark_code: string; strategy_id: string; strategy: PaperStrategy }
+interface PaperAccount { account_id: string; name: string; status?: string; initial_cash: number; cash: number; benchmark_code: string; strategy_id: string; strategy: PaperStrategy }
+interface StrategyVersion { strategy_version_id: string; name: string; version: number; strategy_kind?: string }
 interface PaperDashboard { as_of: string; nav: number; cumulative_return: number; cash_weight: number; account: PaperAccount; positions: PaperPosition[]; runs: PaperRun[]; nav_history: Array<{ drawdown?: number }>; benchmark_comparison: Comparison; latest_shadow?: { snapshot_id: string; as_of: string; status: string } | null; realtime?: { quote_count: number; latest_quote_time?: string | null; high_frequency_used?: boolean } }
 interface TargetSet { targets: PaperTarget[] }
 interface FeatureSnapshot { snapshot_id: string; as_of: string; status: string }
 interface TraceState extends PaperTarget { order?: PaperOrder; run?: PaperRun }
 interface EvidenceLine { statement: string; evidence_ids?: string[]; severity?: string }
 interface PerformanceRow { code: string; name: string; latest_return?: number | null; excess_return?: number | null; coverage?: number | null; status: string }
+interface PaperSettlementResult { filled: Array<{ order_id: string }>; skipped: Array<{ order_id: string; reason: string }> }
 
 const ui = useUiStore();
 const client = useQueryClient();
 const asOf = ref("");
 const selectedAccountId = ref("");
 const showAccountForm = ref(false);
-const accountForm = reactive<OpenApiSchema<"PaperAccountCreate">>({ name: "", initial_cash: 1_000_000, benchmark_code: "000300.SH", strategy_id: "lightgbm_shadow_v1" });
+const accountForm = reactive({ name: "", initial_cash: 1_000_000, benchmark_code: "000300.SH", strategy_id: "lightgbm_shadow_v1", strategy_version_id: "" });
 const batchId = ref("");
 const poll = ref(0);
 const realtimePoll = ref(0);
@@ -50,9 +51,11 @@ const realtimeError = ref("");
 const trace = ref<TraceState | null>(null);
 const accounts = useQuery({ queryKey: ["paper", "accounts"], queryFn: () => api<{ items: PaperAccount[] }>("/api/paper/accounts") });
 const strategies = useQuery({ queryKey: ["paper", "strategies"], queryFn: () => api<{ items: PaperStrategy[] }>("/api/paper/strategies") });
+const strategyVersions = useQuery({ queryKey: ["strategy", "versions"], queryFn: () => api<{ items: StrategyVersion[] }>("/api/strategy-versions") });
 watch(() => accounts.data.value?.items, (items) => { if (!selectedAccountId.value && items?.length) selectedAccountId.value = items[0].account_id; }, { immediate: true });
 watch(selectedAccountId, () => { batchId.value = ""; trace.value = null; });
-const dashboard = useQuery({ queryKey: computed(() => ["paper", "dashboard", selectedAccountId.value, asOf.value]), queryFn: () => { const params = new URLSearchParams(); if (selectedAccountId.value) params.set("account_id", selectedAccountId.value); if (asOf.value) params.set("as_of", asOf.value); return api<PaperDashboard>(`/api/paper/dashboard?${params}`); } });
+const dashboard = useQuery({ queryKey: computed(() => ["paper", "dashboard", selectedAccountId.value, asOf.value]), queryFn: () => { const params = new URLSearchParams(); params.set("account_id", selectedAccountId.value); if (asOf.value) params.set("as_of", asOf.value); return api<PaperDashboard>(`/api/paper/dashboard?${params}`); }, enabled: computed(() => Boolean(selectedAccountId.value)) });
+const orderLedger = useQuery({ queryKey: computed(() => ["paper", "orders", selectedAccountId.value]), queryFn: () => api<PaperOrderLedger>(`/api/paper/orders?account_id=${encodeURIComponent(selectedAccountId.value)}&limit=2000`), enabled: computed(() => Boolean(selectedAccountId.value)) });
 const featureSnapshot = useQuery({ queryKey: ["paper", "feature-snapshot", "latest"], queryFn: () => api<FeatureSnapshot>("/api/factor-snapshots/latest"), retry: false });
 const data = computed(() => dashboard.data.value);
 const researchDate = computed(() => asOf.value || data.value?.latest_shadow?.as_of || "");
@@ -62,7 +65,6 @@ const latestBatch = useQuery({ queryKey: computed(() => ["paper", "batch", "late
 watch(() => latestBatch.data.value?.item?.batch_id, (value) => { if (value && !batchId.value) batchId.value = value; }, { immediate: true });
 const latestRun = computed(() => data.value?.runs?.[0]);
 const activeStrategy = computed(() => data.value?.account?.strategy);
-const orders = computed(() => latestRun.value?.orders || []);
 const currentBatch = computed(() => batch.data.value || latestBatch.data.value?.item || null);
 const batchSteps = computed(() => currentBatch.value?.steps || []);
 const completedBatchSteps = computed(() => batchSteps.value.filter((step) => step.status === "completed").length);
@@ -134,21 +136,40 @@ const daily = useMutation({ mutationFn: () => api<PaperRun>("/api/paper/daily-ru
 const assess = useMutation({ mutationFn: () => api<{ completed: number; results: unknown[] }>("/api/paper/research-assessments", { method: "POST", ...openApiJsonBody<"PaperResearchBatchRequest">({ as_of: researchDate.value || null, account_id: selectedAccountId.value, include_holdings: true, limit: 5, hold_rank_buffer: 30, lookback_days: 730, financial_download_limit: 2, announcement_download_limit: 3, depth: "quick" }) }), onSuccess: async (result) => { ui.notify(`候选研究完成 ${result.completed}/${result.results.length}`); await reload(); }, onError: notifyError });
 const benchmark = useMutation({ mutationFn: () => api<{ benchmark_count: number }>("/api/paper/benchmarks/refresh", { method: "POST", ...openApiJsonBody<"PaperBenchmarkRefresh">({ account_id: data.value?.account?.account_id, as_of: asOf.value || data.value?.benchmark_comparison?.as_of || data.value?.as_of }) }), onSuccess: async (result) => { ui.notify(`已更新 ${result.benchmark_count} 个指数基准`); await reload(); }, onError: notifyError });
 const full = useMutation({ mutationFn: () => api<DailyBatch & { reused: boolean }>("/api/paper/daily-batches", { method: "POST", ...openApiJsonBody<"PaperDailyBatchRequest">({ as_of: asOf.value || null, account_id: selectedAccountId.value, shadow_lookback_days: 240, shadow_batch_size: 20, top_n: 5, hold_rank_buffer: 30, research_lookback_days: 730, financial_download_limit: 2, announcement_download_limit: 3, depth: "quick" }) }), onSuccess: (result) => { batchId.value = result.batch_id; ui.notify(result.reused ? "已复用每日完整批次" : "完整批次已开始"); startPoll(); }, onError: notifyError });
-const createAccount = useMutation({ mutationFn: () => api<PaperAccount>("/api/paper/accounts", { method: "POST", ...openApiJsonBody<"PaperAccountCreate">({ ...accountForm }) }), onSuccess: async (account) => { selectedAccountId.value = account.account_id; showAccountForm.value = false; accountForm.name = ""; await client.invalidateQueries({ queryKey: ["paper"] }); ui.notify("模拟账户已创建"); }, onError: notifyError });
+const createAccount = useMutation({ mutationFn: () => api<PaperAccount>("/api/paper/accounts", { method: "POST", ...jsonBody({ ...accountForm, strategy_version_id: accountForm.strategy_version_id || null }) }), onSuccess: async (account) => { selectedAccountId.value = account.account_id; showAccountForm.value = false; accountForm.name = ""; accountForm.strategy_version_id = ""; await client.invalidateQueries({ queryKey: ["paper"] }); ui.notify("模拟账户已创建"); }, onError: notifyError });
 const batch = useQuery({ queryKey: computed(() => ["paper", "batch", batchId.value]), queryFn: () => api<DailyBatch>(`/api/paper/daily-batches/${batchId.value}`), enabled: computed(() => Boolean(batchId.value)) });
 function notifyError(error: Error) { ui.notify(error.message); }
 function startPoll() { window.clearInterval(poll.value); poll.value = window.setInterval(async () => { const result = await batch.refetch(); if (["completed", "failed"].includes(result.data?.status || "")) { window.clearInterval(poll.value); reload(result.data?.status === "completed" ? "完整批次已完成" : "完整批次执行失败"); } }, 2000); }
 watch([selectedAccountId, asOf], startRealtimePolling);
 onMounted(() => { document.addEventListener("visibilitychange", handleVisibilityChange); startRealtimePolling(); });
 onBeforeUnmount(() => { window.clearInterval(poll.value); window.clearInterval(realtimePoll.value); document.removeEventListener("visibilitychange", handleVisibilityChange); });
-async function settle() { try { await api("/api/paper/settle/realtime", { method: "POST", ...openApiJsonBody<"PaperSettleRequest">({ account_id: selectedAccountId.value }) }); await reload("实时模拟撮合已执行"); } catch (error) { notifyError(error as Error); } }
+const settlementReasonLabels: Record<string, string> = {
+  missing_realtime_quote: "缺少实时行情",
+  no_later_trading_day: "尚无后续交易日",
+  quote_before_approval: "行情早于审批时间",
+  suspended_or_preopen_quote: "停牌或盘前无成交",
+  one_price_limit_up: "一字涨停",
+  one_price_limit_down: "一字跌停",
+  "可卖数量不足": "可卖数量不足",
+  "可用现金不足": "可用现金不足",
+  "持仓数量上限尚未通过卖出释放": "持仓数量上限未释放",
+};
+async function settle() {
+  try {
+    const result = await api<PaperSettlementResult>("/api/paper/settle/realtime", { method: "POST", ...openApiJsonBody<"PaperRealtimeRequest">({ account_id: selectedAccountId.value }) });
+    await reload();
+    const skippedReasons = [...new Set(result.skipped.map((item) => settlementReasonLabels[item.reason] || item.reason))];
+    const detail = result.skipped.length ? `，跳过 ${result.skipped.length} 条：${skippedReasons.join("、")}` : "";
+    ui.notify(result.filled.length ? `实时成交 ${result.filled.length} 条${detail}` : `未产生成交${detail}`);
+  } catch (error) { notifyError(error as Error); }
+}
 async function review(id: string, decision: string) { try { await api(`/api/paper/orders/${encodeURIComponent(id)}/${decision}`, { method: "POST", ...openApiJsonBody<"PaperOrderReview">({ reviewer: "human", note: "人工确认模拟订单" }) }); await reload(decision === "approve" ? "订单已批准" : "订单已拒绝"); } catch (error) { notifyError(error as Error); } }
 function openTargetTrace(item: PaperTarget) { trace.value = item; }
-function openOrderTrace(order: PaperOrder) { trace.value = { ...(targetByCode.value.get(order.security_code) || { security_code: order.security_code, security_name: order.security_name || order.security_code }), order, run: latestRun.value }; }
+function openOrderTrace(order: PaperOrder) { trace.value = { ...(targetByCode.value.get(order.security_code) || { security_code: order.security_code, security_name: order.security_name || order.security_code }), order, run: data.value?.runs.find((run) => run.run_id === order.run_id) || { run_id: order.run_id, status: order.run_status, as_of: order.as_of, orders: [] } }; }
 </script>
 
 <template>
-  <PageHeader eyebrow="PAPER TRADING DESK" title="模拟盘" description="账户绩效、策略信号、人工审批和模拟成交统一管理；完整批次不会自动批准或成交订单。">
+  <PageHeader eyebrow="PAPER TRADING DESK" title="模拟盘" description="账户、持仓、当前策略与模拟成交。">
     <label for="paper-account">账户<select id="paper-account" v-model="selectedAccountId"><option v-for="item in accounts.data.value?.items||[]" :key="item.account_id" :value="item.account_id">{{ item.name }}</option></select></label>
     <button class="icon-button" title="新建模拟账户" aria-label="新建模拟账户" @click="showAccountForm=!showAccountForm"><Plus :size="15" /></button>
     <label for="paper-as-of">研究日<input id="paper-as-of" v-model="asOf" type="date" /></label>
@@ -157,14 +178,14 @@ function openOrderTrace(order: PaperOrder) { trace.value = { ...(targetByCode.va
     <button class="button" :disabled="full.isPending.value" @click="full.mutate()"><Play :size="14" />运行完整批次</button>
     <button class="icon-button" title="立即刷新实时行情" aria-label="立即刷新实时行情" :disabled="realtimeRefreshing" @click="refreshRealtime(true)"><RefreshCw :size="15" :class="{ spinning: realtimeRefreshing }" /></button>
   </PageHeader>
-  <section v-if="showAccountForm" class="content-band white account-create-band"><form class="account-form" @submit.prevent="createAccount.mutate()"><label for="new-account-name">账户名称<input id="new-account-name" v-model="accountForm.name" required maxlength="80" /></label><label for="new-account-capital">初始资金<input id="new-account-capital" v-model.number="accountForm.initial_cash" type="number" min="1" max="1000000000" required /></label><label for="new-account-strategy">策略<select id="new-account-strategy" v-model="accountForm.strategy_id"><option v-for="item in strategies.data.value?.items||[]" :key="item.strategy_id" :value="item.strategy_id">{{ item.name }}</option></select></label><label for="new-account-benchmark">基准<select id="new-account-benchmark" v-model="accountForm.benchmark_code"><option value="000300.SH">沪深300</option><option value="000905.SH">中证500</option><option value="000852.SH">中证1000</option></select></label><button class="button" type="submit" :disabled="createAccount.isPending.value"><Plus :size="14" />创建账户</button></form></section>
+  <section v-if="showAccountForm" class="content-band white account-create-band"><form class="account-form" @submit.prevent="createAccount.mutate()"><label for="new-account-name">账户名称<input id="new-account-name" v-model="accountForm.name" required maxlength="80" /></label><label for="new-account-capital">初始资金<input id="new-account-capital" v-model.number="accountForm.initial_cash" type="number" min="1" max="1000000000" required /></label><label for="new-account-version">已发布策略版本<select id="new-account-version" v-model="accountForm.strategy_version_id"><option value="">使用内置策略</option><option v-for="item in strategyVersions.data.value?.items||[]" :key="item.strategy_version_id" :value="item.strategy_version_id">{{ item.name }} · v{{ item.version }}</option></select></label><label v-if="!accountForm.strategy_version_id" for="new-account-strategy">内置策略<select id="new-account-strategy" v-model="accountForm.strategy_id"><option v-for="item in strategies.data.value?.items||[]" :key="item.strategy_id" :value="item.strategy_id">{{ item.name }}</option></select></label><label for="new-account-benchmark">基准<select id="new-account-benchmark" v-model="accountForm.benchmark_code"><option value="000300.SH">沪深300</option><option value="000905.SH">中证500</option><option value="000852.SH">中证1000</option></select></label><button class="button" type="submit" :disabled="createAccount.isPending.value"><Plus :size="14" />创建账户</button></form></section>
   <AsyncState :loading="dashboard.isPending.value" :error="dashboard.error.value" @retry="dashboard.refetch()">
-    <section class="strategy-ledger"><div><span>ACTIVE ACCOUNT</span><b>{{ data?.account?.name || '—' }}</b><small>{{ data?.account?.account_id }}</small></div><div><span>STRATEGY CONTRACT</span><b>{{ activeStrategy?.name || '—' }}</b><small>{{ activeStrategy?.strategy_id }} @ {{ activeStrategy?.version }}</small></div><div><span>SIGNAL SOURCE</span><b>{{ activeStrategy?.signal_source || '—' }}</b><small>目标仓位 {{ pct(Number(activeStrategy?.config?.target_gross_exposure || 0)) }}</small></div></section>
+    <section class="strategy-ledger"><div><span>当前账户</span><b>{{ data?.account?.name || '—' }}</b><small>{{ data?.account?.status === 'active' ? '运行中' : data?.account?.status || '—' }}</small></div><div><span>当前策略</span><b>{{ activeStrategy?.name || '—' }}</b><small>{{ activeStrategy?.config?.auto_run ? `每日 ${activeStrategy?.config?.run_time || '18:10'} 自动运行` : '手动运行' }}</small></div><div><span>仓位模式</span><b>{{ activeStrategy?.config?.exposure_mode === 'dynamic' ? '动态仓位' : '固定仓位' }}</b><small v-if="activeStrategy?.config?.exposure_mode === 'dynamic'">{{ pct(Number(activeStrategy?.config?.minimum_exposure || 0)) }} - {{ pct(Number(activeStrategy?.config?.maximum_exposure || 0)) }}</small><small v-else>目标 {{ pct(Number(activeStrategy?.config?.target_gross_exposure || 0)) }}</small></div></section>
     <MetricStrip :items="metrics" />
     <PaperPerformanceSection :account-id="data?.account?.account_id" :comparison="data?.benchmark_comparison" :rows="performanceRows" :series="comparisonSeries" :realtime-error="realtimeError" :refreshing="benchmark.isPending.value" @refresh="benchmark.mutate()" />
     <section class="content-band white"><div class="section-heading"><div><span>RESEARCH TARGETS</span><b>Shadow 候选与研究判断</b></div><small>{{ targets.data.value?.targets?.length||0 }} 个目标</small></div><div class="list"><article v-if="!asOf && !latestResearchContractReady" class="list-item"><header><h3>研究合同未对齐</h3><span class="status warn">WAIT</span></header><p>Current Shadow {{ data?.latest_shadow?.as_of || '缺失' }} · 因子快照 {{ featureSnapshot.data.value?.as_of || '缺失' }}。请生成同日完整批次，或明确选择已有共同快照的研究日。</p></article><article v-for="item in targets.data.value?.targets||[]" :key="item.security_code" class="list-item"><header><div><span class="status">#{{ item.shadow_rank||'—' }}</span><h3 style="margin-top:8px">{{ item.security_name }} · {{ item.security_code }}</h3></div><span :class="['status',item.current_research_status==='veto'?'fail':item.current_research_status==='defer'?'warn':'']">{{ item.current_research_status||'未研究' }}</span></header><p>{{ item.target_reason }} · score {{ item.score }}</p><footer><button class="button secondary" @click="openTargetTrace(item)"><Search :size="13" />决策依据</button></footer></article><article v-if="(asOf || latestResearchContractReady) && !targets.data.value?.targets?.length" class="list-item"><p>当前没有可研究的 Shadow 目标。</p></article></div></section>
-    <section v-if="batchId" class="content-band batch-summary"><div class="section-heading"><div><span>RUN STATUS</span><b>批次执行状态</b></div><span :class="['status',currentBatch?.status==='failed'?'fail':currentBatch?.status==='completed'?'':'warn']">{{ currentBatch?.status||'queued' }}</span></div><div class="batch-overview"><div><span>进度</span><b>{{ completedBatchSteps }} / {{ batchSteps.length }}</b></div><div><span>当前步骤</span><b>{{ currentBatch?.current_step || (currentBatch?.status==='completed'?'全部完成':'等待执行') }}</b></div><div><span>批次编号</span><small>{{ batchId }}</small></div></div><ol v-if="batchSteps.length" class="batch-step-list"><li v-for="step in batchSteps" :key="step.step_name"><span :class="['status',step.status==='failed'?'fail':step.status==='completed'?'':'warn']">{{ step.status }}</span><b>{{ step.step_name }}</b><small v-if="step.error">{{ step.error }}</small></li></ol></section>
-    <PaperOrdersSection :orders="orders" @settle="settle" @trace="openOrderTrace" @review="review" />
+    <section v-if="batchId" class="content-band batch-summary"><div class="section-heading"><div><span>RUN STATUS</span><b>批次执行状态</b></div><span :class="['status',currentBatch?.status==='failed'?'fail':currentBatch?.status==='completed'?'':'warn']">{{ currentBatch?.status||'queued' }}</span></div><div class="batch-overview"><div><span>进度</span><b>{{ completedBatchSteps }} / {{ batchSteps.length }}</b></div><div><span>当前步骤</span><b>{{ currentBatch?.current_step || (currentBatch?.status==='completed'?'全部完成':'等待执行') }}</b></div><div><span>研究日</span><small>{{ currentBatch?.as_of || '—' }}</small></div></div><ol v-if="batchSteps.length" class="batch-step-list"><li v-for="step in batchSteps" :key="step.step_name"><span :class="['status',step.status==='failed'?'fail':step.status==='completed'?'':'warn']">{{ step.status }}</span><b>{{ step.step_name }}</b><small v-if="step.error">{{ step.error }}</small></li></ol></section>
+    <PaperOrdersSection :orders="orderLedger.data.value?.items || []" :latest-run-id="orderLedger.data.value?.latest_run_id" :latest-as-of="orderLedger.data.value?.latest_as_of" @settle="settle" @trace="openOrderTrace" @review="review" />
     <PaperPositionsSection :positions="data?.positions || []" />
   </AsyncState>
   <button v-if="trace" class="drawer-backdrop" aria-label="关闭决策依据" @click="trace=null" />
@@ -173,7 +194,7 @@ function openOrderTrace(order: PaperOrder) { trace.value = { ...(targetByCode.va
 
 <style scoped>
 .account-create-band { border-top: 0; }
-.account-form { display: grid; grid-template-columns: minmax(160px, 1.2fr) repeat(3, minmax(140px, 1fr)) auto; gap: 12px; align-items: end; }
+.account-form { display: grid; grid-template-columns: minmax(160px, 1.2fr) repeat(4, minmax(140px, 1fr)) auto; gap: 12px; align-items: end; }
 .strategy-ledger { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--line); background: #18201d; color: #f2f3ed; }
 .strategy-ledger > div { min-width: 0; padding: 17px 22px; border-right: 1px solid rgba(255,255,255,.14); }
 .strategy-ledger > div:last-child { border-right: 0; }

@@ -10,7 +10,9 @@ from app.core.config import Settings
 from app.quant.current_shadow import CurrentShadowPipeline, align_forward_adjusted_fields
 from app.research.store import ResearchStore
 from app.quant.store import QuantStore
-from app.market.updater import IFindDailyClient, code_to_table
+from app.core.primitives import code_to_table
+from app.data.ifind import IFindDataLayer
+from app.market.stock_pool import StockPoolStore
 
 
 class CurrentShadowService:
@@ -19,10 +21,18 @@ class CurrentShadowService:
         settings: Settings,
         store: QuantStore,
         master_store: ResearchStore | None = None,
+        ifind: IFindDataLayer | None = None,
+        stock_pool_store: StockPoolStore | None = None,
     ):
         self.settings = settings
         self.store = store
         self.master_store = master_store or store
+        if ifind is None:
+            raise ValueError("CurrentShadowService 必须使用共享 IFindDataLayer")
+        if stock_pool_store is None:
+            raise ValueError("CurrentShadowService 必须使用本地股池数据库")
+        self.ifind = ifind
+        self.stock_pool_store = stock_pool_store
         self.pipeline = CurrentShadowPipeline(store, settings.current_shadow_root / "providers")
         self._lock = threading.Lock()
 
@@ -77,36 +87,35 @@ class CurrentShadowService:
 
             model, validation = self.pipeline.validate_model(run_id, trust_pickle=trust_pickle)
             start_date = as_of - timedelta(days=lookback_days)
-            client = IFindDailyClient(self.settings, adjustment="forward")
-            client.login()
-            try:
-                universe = client.fetch_csi300_universe()
-                codes = universe["security_code"].tolist()
-                frames = [
-                    client.fetch(codes[offset : offset + batch_size], start_date, as_of)
-                    for offset in range(0, len(codes), batch_size)
-                ]
-            finally:
-                client.logout()
+            pool_snapshot = self.stock_pool_store.resolve("csi300", as_of)
+            universe = pd.DataFrame(pool_snapshot["members"])
+            codes = universe["security_code"].tolist()
+            frames = [
+                self.ifind.get_daily_prices(
+                    codes[offset : offset + batch_size],
+                    start_date,
+                    as_of,
+                    adjustment="forward",
+                )
+                for offset in range(0, len(codes), batch_size)
+            ]
             frame = pd.concat(frames, ignore_index=True)
             raw_frame, missing_raw_codes = self._load_unadjusted_history(codes, start_date, as_of)
             if missing_raw_codes:
-                raw_client = IFindDailyClient(self.settings, adjustment="unadjusted")
-                raw_client.login()
-                try:
-                    missing_frames = [
-                        raw_client.fetch(
-                            missing_raw_codes[offset : offset + batch_size], start_date, as_of
-                        )
-                        for offset in range(0, len(missing_raw_codes), batch_size)
-                    ]
-                finally:
-                    raw_client.logout()
+                missing_frames = [
+                    self.ifind.get_daily_prices(
+                        missing_raw_codes[offset : offset + batch_size],
+                        start_date,
+                        as_of,
+                        adjustment="unadjusted",
+                    )
+                    for offset in range(0, len(missing_raw_codes), batch_size)
+                ]
                 raw_frame = pd.concat([raw_frame, *missing_frames], ignore_index=True)
             frame, alignment = align_forward_adjusted_fields(frame, raw_frame)
             for item in universe.itertuples(index=False):
                 self.master_store.upsert_security_name(
-                    item.security_code, item.security_name, source="iFinD_WCQuery"
+                    item.security_code, item.security_name, source=pool_snapshot["source"]
                 )
             if hasattr(self.store, "sync_security_projection"):
                 self.store.sync_security_projection()

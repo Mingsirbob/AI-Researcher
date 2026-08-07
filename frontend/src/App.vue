@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useQuery } from "@tanstack/vue-query";
-import { Activity, BarChart3, Beaker, BookOpenCheck, Building2, ChevronRight, ClipboardCheck, FileSearch, FlaskConical, Menu, Search, ShieldCheck, X } from "lucide-vue-next";
+import { Activity, BarChart3, Beaker, BookOpenCheck, Building2, ChevronRight, ClipboardCheck, FileSearch, FlaskConical, GitBranch, Menu, Search, ShieldCheck, X } from "lucide-vue-next";
 import { api } from "@/api/client";
 import { useUiStore } from "@/stores/ui";
 
@@ -15,7 +15,7 @@ const searchOpen = ref(false);
 const groups = [
   { label: "交易", items: [{ to: "/", label: "模拟盘", icon: Activity }] },
   { label: "公司", items: [{ to: "/company", label: "公司分析", icon: Building2 }, { to: "/theses", label: "长期论点", icon: FileSearch }] },
-  { label: "量化实验室", items: [{ to: "/quant", label: "数据与特征", icon: BarChart3 }, { to: "/factor-development", label: "因子开发", icon: FlaskConical }, { to: "/factor-evaluation", label: "因子评价", icon: Beaker }, { to: "/backtest", label: "策略回测", icon: BookOpenCheck }, { to: "/factor-library", label: "因子库", icon: ClipboardCheck }] },
+  { label: "量化实验室", items: [{ to: "/quant", label: "数据与特征", icon: BarChart3 }, { to: "/factor-development", label: "因子开发", icon: FlaskConical }, { to: "/factor-evaluation", label: "因子评价", icon: Beaker }, { to: "/backtest", label: "策略回测", icon: BookOpenCheck }, { to: "/factor-library", label: "因子库", icon: ClipboardCheck }, { to: "/strategies", label: "策略编辑器", icon: GitBranch }] },
   { label: "审计", items: [{ to: "/decisions", label: "案例评价", icon: ShieldCheck }, { to: "/acceptance", label: "质量验收", icon: ClipboardCheck }] },
 ];
 

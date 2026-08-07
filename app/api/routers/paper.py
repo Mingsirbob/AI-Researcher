@@ -1,5 +1,6 @@
 from .base import domain_router
 from ..handlers import *  # noqa: F403
+from app.workflows.daily_batch import resolve_batch_date
 
 router = domain_router()
 
@@ -12,7 +13,8 @@ def owns(path: str) -> bool:
 def create_paper_account(request: PaperAccountCreate) -> dict:
     try:
         return paper_trading_service.create_account(
-            request.name, request.initial_cash, request.benchmark_code, request.strategy_id
+            request.name, request.initial_cash, request.benchmark_code,
+            request.strategy_id, request.strategy_version_id,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -28,12 +30,41 @@ def list_paper_strategies() -> dict:
     return {"items": paper_trading_service.list_strategies()}
 
 
+@router.get("/api/paper/scheduler/status")
+def paper_scheduler_status(request: Request) -> dict:
+    scheduler = getattr(request.app.state, "paper_scheduler", None)
+    return scheduler.last_result if scheduler else {"status": "disabled"}
+
+
+@router.post("/api/paper/accounts/{account_id}/deployments", status_code=201)
+def deploy_paper_strategy(account_id: str, request: PaperStrategyDeploymentCreate) -> dict:
+    try:
+        return paper_trading_service.deploy_strategy(account_id, request.strategy_version_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/api/paper/dashboard")
 def paper_dashboard(account_id: str | None = None, as_of: str | None = None) -> dict:
     try:
         return paper_trading_service.dashboard(account_id, as_of)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/api/paper/orders")
+def paper_order_ledger(
+    account_id: str | None = None,
+    limit: int = Query(500, ge=1, le=2000),
+) -> dict:
+    try:
+        return paper_trading_service.order_ledger(account_id, limit)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/api/paper/benchmarks/refresh")
@@ -239,9 +270,14 @@ async def create_daily_research_batch(
     request: PaperDailyBatchRequest,
     background_tasks: BackgroundTasks,
 ) -> dict:
-    as_of = request.as_of or default_end_date().isoformat()
     try:
-        date.fromisoformat(as_of)
+        as_of = await run_in_threadpool(
+            resolve_batch_date,
+            request.as_of,
+            local_latest=research_store.market_data_end(),
+            trading_dates=ifind_service.trading_dates,
+            default_target=default_end_date(),
+        )
         account = (
             paper_trading_service.account(request.account_id)
             if request.account_id else paper_trading_service.default_account()
@@ -277,7 +313,8 @@ def latest_daily_research_batch(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"item": daily_batch_store.latest(account["account_id"], as_of)}
+    target_date = as_of or research_store.market_data_end()
+    return {"item": daily_batch_store.latest(account["account_id"], target_date)}
 
 
 @router.get("/api/paper/daily-batches/{batch_id}")
@@ -292,7 +329,7 @@ def daily_research_batch(batch_id: str) -> dict:
 def refresh_paper_realtime_quotes(request: PaperRealtimeRequest) -> dict:
     try:
         return paper_trading_service.refresh_realtime_quotes(request.account_id)
-    except IFindError as exc:
+    except IFindDataError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except (KeyError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -302,7 +339,7 @@ def refresh_paper_realtime_quotes(request: PaperRealtimeRequest) -> dict:
 def settle_paper_orders_realtime(request: PaperRealtimeRequest) -> dict:
     try:
         return paper_trading_service.settle_realtime(request.account_id)
-    except IFindError as exc:
+    except IFindDataError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except (KeyError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

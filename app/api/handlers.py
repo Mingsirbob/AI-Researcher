@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -26,13 +29,15 @@ from app.quant.factor_lab import FactorLabService
 from app.quant.factor_evaluation import FactorEvaluationService
 from app.quant.factor_backtest import FactorBacktestService
 from app.quant.factor_release import FactorReleaseService
-from app.integrations.ifind import IFindError, IFindService
+from app.data.ifind import IFindDataError
 from app.research.announcements import AnnouncementPipeline
 from app.research.financials import build_financial_change_template
 from app.research.acceptance import EvidenceAcceptanceService
 from app.decision.cases import DecisionCaseService, POLICY_VERSION
 from app.decision.outcomes import DecisionOutcomeService
 from app.paper.service import PAPER_BENCHMARKS, PaperTradingService
+from app.paper.scheduler import PaperDailyScheduler
+from app.market.updater import default_end_date
 from app.quant.current_shadow_service import CurrentShadowService
 from app.workflows.daily_batch import DailyBatchRunner, DailyBatchStore
 from app.research.company import (
@@ -45,7 +50,6 @@ from app.research.assessment import (
     RESEARCH_ASSESSMENT_POLICY_VERSION,
     RESEARCH_ASSESSMENT_SCHEMA_VERSION,
 )
-from app.market.updater import IFindDailyClient, StockDataUpdater, default_end_date
 from app.research.store import ResearchStore
 from app.core.runtime_events import RuntimeEventStore
 from app.core.sqlite_store import SQLiteStore
@@ -85,6 +89,11 @@ from app.schemas import (
     ThesisMonitorBaselineRequest,
     ThesisMonitorCheckRequest,
     ThesisUpdate,
+    StrategyDraftCreate,
+    StrategyDraftUpdate,
+    StrategyCodeUpdate,
+    StrategyGenerateRequest,
+    PaperStrategyDeploymentCreate,
 )
 from app.thesis.store import ThesisStore
 from ..container import container
@@ -97,11 +106,13 @@ ifind_service = container.ifind_service
 research_store = container.research_store
 paper_store = container.paper_store
 quant_store = container.quant_store
+strategy_service = container.strategy_service
 company_research_service = container.company_research_service
 announcement_pipeline = container.announcement_pipeline
 factor_snapshot_service = container.factor_snapshot_service
 factor_lab_repository = container.factor_lab_repository
 factor_lab_service = container.factor_lab_service
+simple_research_catalog = factor_lab_service.simple_catalog
 factor_evaluation_service = container.factor_evaluation_service
 factor_backtest_service = container.factor_backtest_service
 factor_release_service = container.factor_release_service
@@ -116,22 +127,7 @@ daily_batch_runner = container.daily_batch_runner
 
 def ensure_market_data(as_of: str) -> dict:
     target = date.fromisoformat(as_of)
-    client = IFindDailyClient(settings, adjustment="unadjusted")
-    updater = StockDataUpdater(settings.stock_db, client.fetch)
-    client.login()
-    try:
-        trading_dates = client.fetch_trading_dates(target - timedelta(days=31), target)
-        if not trading_dates or trading_dates[-1] != target:
-            latest = trading_dates[-1].isoformat() if trading_dates else "none"
-            raise ValueError(f"{as_of} 不是已确认交易日；最近交易日为 {latest}")
-        result = updater.update(
-            end_date=target,
-            batch_size=50,
-            max_retries=settings.ifind_max_attempts,
-            retry_delay=settings.ifind_backoff_seconds,
-        )
-    finally:
-        client.logout()
+    result = ifind_service.sync_daily_prices(target_date=target)
     if result["status"] not in {"success", "up_to_date"}:
         raise RuntimeError(
             f"日线补齐未完全通过：status={result['status']}, "
@@ -150,24 +146,19 @@ def refresh_paper_benchmarks(
     account_id: str | None = None, as_of: str | None = None
 ) -> dict:
     sync_range = paper_trading_service.benchmark_sync_range(account_id, as_of)
-    client = IFindDailyClient(settings, adjustment="unadjusted")
-    client.login()
-    try:
-        frame = client.fetch(
-            sync_range["benchmark_codes"],
-            date.fromisoformat(sync_range["start_date"]),
-            date.fromisoformat(sync_range["end_date"]),
-            max_attempts=settings.ifind_max_attempts,
-        )
-    finally:
-        client.logout()
+    frame = ifind_service.get_daily_prices(
+        sync_range["benchmark_codes"],
+        date.fromisoformat(sync_range["start_date"]),
+        date.fromisoformat(sync_range["end_date"]),
+        adjustment="unadjusted",
+        max_attempts=min(settings.ifind_max_attempts, 2),
+    )
     sync = paper_trading_service.save_benchmark_prices(
-        sync_range["account_id"],
         frame.to_dict(orient="records"),
         source="iFinD THS_HD",
     )
     comparison = paper_trading_service.dashboard(
-        sync_range["account_id"], sync_range["end_date"]
+        account_id, sync_range["end_date"]
     )["benchmark_comparison"]
     return {
         **sync,
@@ -209,10 +200,120 @@ def public_ifind_context(context: dict) -> dict:
     return cleaned
 
 
+def load_ifind_context(code: str, as_of: str, lookback_days: int = 365) -> dict:
+    company_data = ifind_service.get_company_data(
+        [code],
+        as_of=date.fromisoformat(as_of),
+        lookback_days=lookback_days,
+    )
+    profile = company_data["profiles"][0]
+    return {
+        "security": {"code": code, "name": profile.get("name")},
+        "as_of": as_of,
+        "lookback_start": (
+            date.fromisoformat(as_of) - timedelta(days=lookback_days)
+        ).isoformat(),
+        "announcements": company_data["announcements"].get(code, [])[:20],
+        "source": company_data["source"],
+    }
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    yield
-    await run_in_threadpool(application.state.container.close)
+    app_container = application.state.container
+    sync_task = None
+    scheduler_task = None
+    if app_container.settings.ifind_credentials_configured:
+        sync_task = asyncio.create_task(
+            run_in_threadpool(app_container.ifind_service.sync_daily_prices)
+        )
+        application.state.market_sync_task = sync_task
+        scheduler = PaperDailyScheduler(
+            app_container.paper_trading_service,
+            app_container.ifind_service,
+        )
+        application.state.paper_scheduler = scheduler
+        scheduler_task = asyncio.create_task(_paper_scheduler_loop(scheduler))
+        application.state.paper_scheduler_task = scheduler_task
+    try:
+        yield
+    finally:
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await scheduler_task
+        if sync_task is not None and not sync_task.done():
+            try:
+                await sync_task
+            except Exception:
+                pass
+        await run_in_threadpool(app_container.close)
+
+
+async def _scheduled_account_run(account: dict, as_of: str) -> dict:
+    config = account["strategy"].get("config") or {}
+    request = PaperDailyBatchRequest(
+        as_of=as_of,
+        account_id=account["account_id"],
+        model_run_id=config.get("model_run_id"),
+        top_n=int(config.get("top_n", 5)),
+        hold_rank_buffer=int(config.get("hold_rank_buffer", 30)),
+        target_gross_exposure=float(config.get("target_gross_exposure", 0.5)),
+        max_position_weight=float(config.get("max_position_weight", 0.12)),
+        max_industry_weight=float(config.get("max_industry_weight", 0.2)),
+        max_pair_correlation=float(config.get("max_pair_correlation", 0.85)),
+    )
+    batch_config = request.model_dump(exclude={"as_of", "account_id"})
+    batch, should_start = daily_batch_store.prepare(
+        account_id=account["account_id"],
+        as_of=as_of,
+        config=batch_config,
+    )
+    if should_start:
+        await run_daily_research_batch(
+            batch["batch_id"], request, as_of, account["account_id"]
+        )
+        batch = daily_batch_store.get(batch["batch_id"])
+    else:
+        batch = daily_batch_store.get(batch["batch_id"])
+    if not batch or batch["status"] != "completed":
+        return {
+            "status": "failed",
+            "batch_id": batch["batch_id"] if batch else None,
+            "error": (batch or {}).get("error") or "每日批次未完成",
+        }
+    order_step = next(
+        item for item in batch["steps"] if item["step_name"] == "order_proposals"
+    )
+    run_id = order_step["result"]["run_id"]
+    run = await run_in_threadpool(paper_trading_service.run, run_id)
+    return {
+        "status": "completed",
+        "batch_id": batch["batch_id"],
+        "run_id": run_id,
+        "approval_mode": "manual",
+        "proposed_count": sum(order["status"] == "proposed" for order in run["orders"]),
+        "filled_count": 0,
+        "skipped_count": 0,
+    }
+
+
+async def _paper_scheduler_loop(scheduler: PaperDailyScheduler) -> None:
+    while True:
+        try:
+            await scheduler.run_once(
+                datetime.now(ZoneInfo("Asia/Shanghai")),
+                _scheduled_account_run,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            scheduler.last_result = {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "retrying": True,
+            }
+        await asyncio.sleep(60)
 
 
 frontend_dist = ROOT / "frontend" / "dist"
@@ -262,16 +363,20 @@ async def hydrate_security_names(items: list[dict]) -> str | None:
     if not missing_codes or not ifind_service.status()["configured"]:
         return None
     try:
-        profiles = await run_in_threadpool(
-            ifind_service.get_security_profiles, missing_codes
+        company_data = await run_in_threadpool(
+            lambda: ifind_service.get_company_data(
+                missing_codes,
+                as_of=date.today(),
+                include_announcements=False,
+            )
         )
-        for profile in profiles:
+        for profile in company_data["profiles"]:
             if profile.get("name"):
                 research_store.upsert_security_name(
                     profile["code"], profile["name"], profile["source"]
                 )
         return None
-    except IFindError as exc:
+    except IFindDataError as exc:
         return str(exc)
 
 
@@ -281,6 +386,8 @@ async def run_daily_research_batch(
     as_of: str,
     account_id: str,
 ) -> None:
+    account = paper_trading_service.account(account_id)
+    strategy = account["strategy"]
     async def market_data_step() -> dict:
         result = await run_in_threadpool(ensure_market_data, as_of)
         try:
@@ -313,6 +420,8 @@ async def run_daily_research_batch(
         }
 
     async def current_shadow_step() -> dict:
+        if strategy.get("signal_source") == "multifactor_linear":
+            return {"status": "skipped", "reason": "线性多因子策略直接使用因子快照"}
         snapshot = await run_in_threadpool(
             lambda: current_shadow_service.generate(
                 as_of=date.fromisoformat(as_of),
@@ -337,6 +446,10 @@ async def run_daily_research_batch(
         }
 
     async def candidate_research_step() -> dict:
+        if not strategy.get("research_enabled", True):
+            return {"status": "skipped", "reason": "当前策略未启用个股研究过滤"}
+        from app.api.routers.paper import build_paper_research_assessments
+
         result = await build_paper_research_assessments(PaperResearchBatchRequest(
             as_of=as_of,
             account_id=account_id,

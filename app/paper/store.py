@@ -12,18 +12,34 @@ class PaperStoreMixin:
         quote_provider: Any | None = None,
         paper_store: SQLiteStore | ResearchStore | None = None,
         quant_store: QuantStore | None = None,
+        strategy_service: Any | None = None,
+        stock_pool_store: StockPoolStore | None = None,
     ):
         self.repository = repository
         self.store = store
         self.paper_store = paper_store or store
         self.quant_store = quant_store or store
         self.quote_provider = quote_provider
+        self.strategy_service = strategy_service
+        self.stock_pool_store = stock_pool_store or StockPoolStore(
+            repository.db_path.with_name("stock_pool.db")
+        )
         self._initialize()
 
     def _initialize(self) -> None:
         apply_migration(self.paper_store.connect, "0003_paper_trading", self._create_schema)
         apply_migration(self.paper_store.connect, "0007_paper_benchmarks", self._create_benchmark_schema)
         apply_migration(self.paper_store.connect, "0013_paper_strategies", self._create_strategy_schema)
+        apply_migration(
+            self.paper_store.connect,
+            "0023_paper_realtime_quote_lookup",
+            self._create_realtime_quote_lookup_index,
+        )
+        apply_migration(
+            self.paper_store.connect,
+            "0025_strategy_deployment",
+            self._create_strategy_deployment_schema,
+        )
         migrate_legacy_tables(
             target=self.paper_store,
             source=self.store,
@@ -31,7 +47,111 @@ class PaperStoreMixin:
             tables=PAPER_TRADING_TABLES,
             replace_tables=("paper_strategy",),
         )
+        apply_migration(
+            self.paper_store.connect,
+            "0028_global_index_prices",
+            self._migrate_global_index_prices,
+        )
+        apply_migration(
+            self.paper_store.connect,
+            "0029_deploy_system_lightgbm_strategy",
+            self._deploy_system_lightgbm_strategy,
+        )
+        apply_migration(
+            self.paper_store.connect,
+            "0030_manual_paper_approval",
+            self._require_manual_approval,
+        )
         self._recover_run_statuses()
+
+    def _require_manual_approval(self) -> None:
+        with self.paper_store.connect() as conn:
+            conn.execute(
+                """UPDATE paper_order
+                   SET status='proposed', reviewer=NULL, review_note=NULL, reviewed_at=NULL
+                   WHERE status='approved' AND fill_date IS NULL
+                     AND reviewer='paper-auto-scheduler'"""
+            )
+
+    def _deploy_system_lightgbm_strategy(self) -> None:
+        version_id = getattr(self.strategy_service, "system_lightgbm_version_id", None)
+        if not version_id:
+            return
+        version = self.strategy_service.version(version_id)
+        now = utc_now()
+        with self.paper_store.connect() as conn:
+            accounts = conn.execute(
+                "SELECT account_id FROM paper_account WHERE strategy_id=? AND status='active'",
+                (LIGHTGBM_SHADOW_STRATEGY_ID,),
+            ).fetchall()
+            for account in accounts:
+                active = conn.execute(
+                    "SELECT 1 FROM paper_strategy_deployment WHERE account_id=? AND status='active'",
+                    (account["account_id"],),
+                ).fetchone()
+                if active:
+                    continue
+                conn.execute(
+                    "INSERT INTO paper_strategy_deployment VALUES (?, ?, ?, ?, 'active', ?, NULL)",
+                    (str(uuid.uuid4()), account["account_id"], version_id, version["compiled_hash"], now),
+                )
+
+    def _migrate_global_index_prices(self) -> None:
+        with self.paper_store.connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='paper_benchmark_price'"
+            ).fetchone()
+            if not exists:
+                return
+            rows = [dict(row) for row in conn.execute(
+                """
+                SELECT benchmark_code AS thscode, trading_date AS time,
+                       close, source
+                FROM paper_benchmark_price
+                ORDER BY fetched_at, account_id
+                """
+            ).fetchall()]
+        deduplicated: dict[tuple[str, str], dict] = {}
+        for row in rows:
+            key = (row["thscode"], row["time"])
+            previous = deduplicated.get(key)
+            if previous is not None and abs(float(previous["close"]) - float(row["close"])) > 1e-8:
+                raise ValueError(f"账户间指数行情冲突：{key[0]} {key[1]}")
+            deduplicated[key] = row
+        by_source: dict[str, list[dict]] = {}
+        for row in deduplicated.values():
+            by_source.setdefault(row.pop("source"), []).append(row)
+        for source, source_rows in by_source.items():
+            self.stock_pool_store.save_index_prices(source_rows, source=source)
+        with self.paper_store.connect() as conn:
+            conn.execute("DROP TABLE paper_benchmark_price")
+
+    def _create_strategy_deployment_schema(self) -> None:
+        with self.paper_store.connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS paper_strategy_deployment (
+                    deployment_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    strategy_version_id TEXT NOT NULL,
+                    compiled_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    deployed_at TEXT NOT NULL,
+                    retired_at TEXT,
+                    FOREIGN KEY (account_id) REFERENCES paper_account(account_id)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_strategy_deployment_active
+                ON paper_strategy_deployment(account_id) WHERE status='active';
+                """
+            )
+
+    def _create_realtime_quote_lookup_index(self) -> None:
+        with self.paper_store.connect() as conn:
+            conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_paper_realtime_quote_latest
+                   ON paper_realtime_quote(account_id, security_code, received_at DESC)"""
+            )
 
     def _create_strategy_schema(self) -> None:
         with self.paper_store.connect() as conn:
@@ -245,13 +365,45 @@ class PaperStoreMixin:
         return [self._decode_json(dict(row), "config") for row in rows]
 
     def _with_strategy(self, account: dict) -> dict:
-        return {**account, "strategy": self._strategy(account["strategy_id"])}
+        deployment = None
+        with self.paper_store.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_strategy_deployment WHERE account_id=? AND status='active'",
+                (account["account_id"],),
+            ).fetchone()
+            deployment = dict(row) if row else None
+        if deployment and self.strategy_service:
+            strategy = self.strategy_service.runtime_strategy(deployment["strategy_version_id"])
+            return {**account, "strategy": strategy, "strategy_deployment": deployment}
+        return {**account, "strategy": self._strategy(account["strategy_id"]), "strategy_deployment": None}
+
+    def deploy_strategy(self, account_id: str, strategy_version_id: str) -> dict:
+        self.account(account_id)
+        if self.strategy_service is None:
+            raise RuntimeError("策略版本服务未配置")
+        version = self.strategy_service.version(strategy_version_id)
+        deployment_id, now = str(uuid.uuid4()), utc_now()
+        with self.paper_store.connect() as conn:
+            conn.execute(
+                "UPDATE paper_strategy_deployment SET status='retired', retired_at=? WHERE account_id=? AND status='active'",
+                (now, account_id),
+            )
+            conn.execute(
+                "INSERT INTO paper_strategy_deployment VALUES (?, ?, ?, ?, 'active', ?, NULL)",
+                (deployment_id, account_id, strategy_version_id, version["compiled_hash"], now),
+            )
+        return self.account(account_id)["strategy_deployment"]
 
     def create_account(
         self, name: str, initial_cash: float, benchmark_code: str,
         strategy_id: str = DEFAULT_PAPER_STRATEGY_ID,
+        strategy_version_id: str | None = None,
     ) -> dict:
         self._strategy(strategy_id)
+        if strategy_version_id:
+            if self.strategy_service is None:
+                raise RuntimeError("策略版本服务未配置")
+            self.strategy_service.version(strategy_version_id)
         now = utc_now()
         account_id = str(uuid.uuid4())
         with self.paper_store.connect() as conn:
@@ -261,6 +413,18 @@ class PaperStoreMixin:
                  created_at, updated_at, strategy_id)
                 VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)""",
                 (account_id, name, initial_cash, initial_cash, benchmark_code, now, now, strategy_id),
+            )
+        if (
+            strategy_version_id
+            and self.strategy_service is not None
+        ):
+            self.deploy_strategy(account_id, strategy_version_id)
+        elif (
+            strategy_id == LIGHTGBM_SHADOW_STRATEGY_ID
+            and getattr(self.strategy_service, "system_lightgbm_version_id", None)
+        ):
+            self.deploy_strategy(
+                account_id, self.strategy_service.system_lightgbm_version_id
             )
         return self.account(account_id)
 

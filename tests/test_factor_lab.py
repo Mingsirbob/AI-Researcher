@@ -60,6 +60,18 @@ def test_factor_lab_seeds_templates_versions_and_current_model_contract(tmp_path
     alpha = next(item for item in factors if item["factor_id"] == "alpha158_bundle")
     assert alpha["lifecycle_status"] == "approved"
     assert alpha["model_used"] == 0  # no imported model in this isolated store
+    assert overview["alpha158"]["feature_count"] == 158
+    assert overview["alpha158"]["category_count"] == 8
+    assert sum(item["count"] for item in overview["alpha158"]["categories"]) == 158
+    compatible = [item for item in factors if item["strategy_compatible"]]
+    assert {item["factor_id"] for item in compatible} == {
+        "momentum_20d", "momentum_60d", "volatility_60d",
+        "max_drawdown_250d", "range_position_250d",
+    }
+    assert all(not item["strategy_eligible"] for item in compatible)
+    assert next(
+        item for item in compatible if item["factor_id"] == "momentum_20d"
+    )["strategy_runtime_field"] == "return_20d"
 
 
 def test_factor_versions_are_immutable_and_lifecycle_is_gated(tmp_path):

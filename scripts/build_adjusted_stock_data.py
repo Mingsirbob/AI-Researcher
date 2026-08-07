@@ -13,7 +13,8 @@ if str(ROOT) not in sys.path:
 
 from app.market.adjusted_data import AdjustedStockDataBuilder
 from app.core.config import settings
-from app.market.updater import IFindDailyClient, default_end_date
+from app.data.ifind import INDEX_UNIVERSES, IFindDataLayer
+from app.market.updater import default_end_date
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,24 +40,30 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     target_db = settings.stock_qfq_db if args.adjustment == "forward" else settings.stock_hfq_db
-    client = IFindDailyClient(settings, adjustment=args.adjustment)
-    raw_client = IFindDailyClient(settings, adjustment="unadjusted")
+    data = IFindDataLayer(settings)
     needs_login = args.universe == "csi300" or not args.dry_run
     if needs_login:
-        client.login()
-        raw_client.login()
+        data.start()
     try:
-        universe = client.fetch_csi300_universe() if args.universe == "csi300" else None
+        universe = (
+            data.get_index_members(INDEX_UNIVERSES["csi300"], args.end_date)
+            if args.universe == "csi300"
+            else None
+        )
         builder = AdjustedStockDataBuilder(
             settings.stock_db,
             target_db,
-            client.fetch,
+            lambda codes, start, end, attempt=1: data.get_daily_prices(
+                codes, start, end, adjustment=args.adjustment, attempt=attempt
+            ),
             adjustment=args.adjustment,
             universe=universe,
             universe_name="csi300_current" if universe is not None else "source_database",
             universe_as_of=date.today().isoformat(),
-            universe_source="iFinD THS_WCQuery" if universe is not None else "stock_data.db tables",
-            raw_fetch=raw_client.fetch,
+            universe_source="iFinD THS_DR" if universe is not None else "stock_data.db tables",
+            raw_fetch=lambda codes, start, end, attempt=1: data.get_daily_prices(
+                codes, start, end, adjustment="unadjusted", attempt=attempt
+            ),
         )
         plan = builder.plan(end_date=args.end_date, start_date=args.start_date)
         print(json.dumps(plan.as_dict(), ensure_ascii=False, indent=2))
@@ -73,8 +80,7 @@ def main() -> int:
         return 0 if result["published"] else 2
     finally:
         if needs_login:
-            raw_client.logout()
-            client.logout()
+            data.close()
 
 
 if __name__ == "__main__":

@@ -22,8 +22,8 @@ from app.quant.current_shadow import (
 )
 from app.research.store import ResearchStore
 from app.quant.store import QuantStore
-from app.market.updater import IFindDailyClient
-from app.market.updater import code_to_table
+from app.core.primitives import code_to_table
+from app.data.ifind import INDEX_UNIVERSES, IFindDataLayer
 
 
 def parse_args() -> argparse.Namespace:
@@ -100,33 +100,36 @@ def main() -> int:
         raise ValueError("证券主数据尚未记录本地行情截止日")
     as_of = args.as_of or date.fromisoformat(market_data_end)
     start_date = as_of - timedelta(days=args.lookback_days)
-    client = IFindDailyClient(settings, adjustment="forward")
-    client.login()
+    data = IFindDataLayer(settings)
+    data.start()
     try:
-        universe = client.fetch_csi300_universe()
+        universe = data.get_index_members(INDEX_UNIVERSES["csi300"], as_of)
         frames: list[pd.DataFrame] = []
         codes = universe["security_code"].tolist()
         for offset in range(0, len(codes), args.batch_size):
             frames.append(
-                client.fetch(codes[offset : offset + args.batch_size], start_date, as_of)
+                data.get_daily_prices(
+                    codes[offset : offset + args.batch_size],
+                    start_date,
+                    as_of,
+                    adjustment="forward",
+                )
             )
-    finally:
-        client.logout()
-    frame = pd.concat(frames, ignore_index=True)
-    raw_frame, missing_raw_codes = load_unadjusted_history(codes, start_date, as_of)
-    if missing_raw_codes:
-        raw_client = IFindDailyClient(settings, adjustment="unadjusted")
-        raw_client.login()
-        try:
+        frame = pd.concat(frames, ignore_index=True)
+        raw_frame, missing_raw_codes = load_unadjusted_history(codes, start_date, as_of)
+        if missing_raw_codes:
             missing_frames = [
-                raw_client.fetch(
-                    missing_raw_codes[offset : offset + args.batch_size], start_date, as_of
+                data.get_daily_prices(
+                    missing_raw_codes[offset : offset + args.batch_size],
+                    start_date,
+                    as_of,
+                    adjustment="unadjusted",
                 )
                 for offset in range(0, len(missing_raw_codes), args.batch_size)
             ]
-        finally:
-            raw_client.logout()
-        raw_frame = pd.concat([raw_frame, *missing_frames], ignore_index=True)
+            raw_frame = pd.concat([raw_frame, *missing_frames], ignore_index=True)
+    finally:
+        data.close()
     frame, alignment = align_forward_adjusted_fields(frame, raw_frame)
     if args.diagnose_data:
         contract = validate_current_data(
@@ -151,7 +154,7 @@ def main() -> int:
         return 0 if contract["status"] == "passed" else 2
     for item in universe.itertuples(index=False):
         research_store.upsert_security_name(
-            item.security_code, item.security_name, source="iFinD_WCQuery"
+            item.security_code, item.security_name, source="iFinD_THS_DR"
         )
     store.sync_security_projection()
     snapshot = pipeline.predict(

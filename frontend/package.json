@@ -18,6 +18,7 @@
     "@perspective-dev/viewer": "^5.0.0",
     "@perspective-dev/viewer-datagrid": "^5.0.0",
     "@tanstack/vue-query": "^5.83.0",
+    "@vue-flow/core": "^1.48.2",
     "ag-grid-community": "^36.0.2",
     "ag-grid-vue3": "^36.0.2",
     "echarts": "^6.1.0",

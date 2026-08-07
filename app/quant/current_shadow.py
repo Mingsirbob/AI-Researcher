@@ -448,7 +448,7 @@ class CurrentShadowPipeline:
             "universe": "csi300_current",
             "adjustment": "forward",
             "ifind_params": "CPS:2",
-            "data_source": "iFinD THS_WCQuery + THS_HD",
+            "data_source": "iFinD THS_DR + THS_HD",
             "data_start": min(pd.to_datetime(contract["frame"]["time"])).date().isoformat(),
             "data_end": max(pd.to_datetime(contract["frame"]["time"])).date().isoformat(),
             "data_fingerprint": fingerprint,

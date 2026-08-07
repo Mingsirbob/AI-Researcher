@@ -4,6 +4,7 @@ import inspect
 import json
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import date, timedelta
 from typing import Any
 
 from app.core.primitives import canonical_hash, canonical_json
@@ -23,6 +24,22 @@ DAILY_BATCH_STEPS = (
     "order_proposals",
 )
 PAPER_DAILY_BATCH_TABLES = ("paper_daily_batch", "paper_daily_batch_step")
+
+
+def resolve_batch_date(
+    requested: str | None,
+    *,
+    local_latest: str | None,
+    trading_dates: Callable[[date, date], list[date]],
+    default_target: date | None = None,
+) -> str:
+    if local_latest is not None:
+        date.fromisoformat(local_latest)
+    target = date.fromisoformat(requested) if requested else (default_target or date.today())
+    confirmed = trading_dates(target - timedelta(days=31), target)
+    if not confirmed:
+        raise ValueError(f"{target.isoformat()} 之前没有可用交易日")
+    return confirmed[-1].isoformat()
 
 
 class DailyBatchStore:

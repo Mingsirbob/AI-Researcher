@@ -8,7 +8,7 @@ from app.main import app, domain_routers
 
 
 OPENAPI_BASELINE_SHA256 = (
-    "ec8248a471815d4c5cc8ba56c5ef7664e4d57a816787048cb8289223b69070fc"
+    "2d878254c8c0bc7d93a905107c8ba2b0aa11435141627a6fe8b512e377c85725"
 )
 
 
@@ -18,7 +18,7 @@ def test_openapi_contract_matches_p0_baseline():
         schema, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
 
-    assert len(schema["paths"]) == 87
+    assert len(schema["paths"]) == 104
     assert hashlib.sha256(canonical).hexdigest() == OPENAPI_BASELINE_SHA256
 
 

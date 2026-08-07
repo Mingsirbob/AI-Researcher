@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -156,7 +156,34 @@ class PaperAccountCreate(BaseModel):
     name: str = Field(default="每日模拟组合", min_length=1, max_length=80)
     initial_cash: float = Field(default=1_000_000, gt=0, le=1_000_000_000)
     benchmark_code: Literal["000300.SH", "000905.SH", "000852.SH"] = "000300.SH"
-    strategy_id: Literal["lightgbm_shadow_v1", "multifactor_linear_v1"] = "lightgbm_shadow_v1"
+    strategy_id: str = Field(default="lightgbm_shadow_v1", min_length=2, max_length=128)
+    strategy_version_id: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+class StrategyDraftCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str = Field(default="", max_length=1000)
+    template_id: str = Field(min_length=2, max_length=80)
+
+
+class StrategyDraftUpdate(BaseModel):
+    definition: dict[str, Any]
+
+
+class StrategyCodeUpdate(BaseModel):
+    source_code: str = Field(min_length=1, max_length=50_000)
+
+
+class StrategyGenerateRequest(BaseModel):
+    requirement: str = Field(min_length=8, max_length=4000)
+    name: str = Field(min_length=2, max_length=120)
+    pool_id: str = Field(default="csi300", min_length=2, max_length=80)
+    filter_pipeline_id: Literal["factor_quality_passed"] = "factor_quality_passed"
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class PaperStrategyDeploymentCreate(BaseModel):
+    strategy_version_id: str = Field(min_length=8, max_length=128)
 
 
 class PaperBenchmarkRefresh(BaseModel):

@@ -8,7 +8,6 @@ class PaperBenchmarkMixin:
     def benchmark_sync_range(
         self, account_id: str | None = None, as_of: str | None = None
     ) -> dict:
-        account = self.account(account_id) if account_id else self.default_account()
         end = as_of or self.store.market_data_end()
         if end is None:
             raise ValueError("本地行情库没有可用截止日")
@@ -16,15 +15,14 @@ class PaperBenchmarkMixin:
         with self.paper_store.connect() as conn:
             row = conn.execute(
                 """SELECT MIN(fill_date) FROM paper_order
-                   WHERE account_id=? AND status='filled' AND fill_date<=?""",
-                (account["account_id"], end),
+                   WHERE status='filled' AND fill_date<=?""",
+                (end,),
             ).fetchone()
         start = (
             (date.fromisoformat(row[0]) - timedelta(days=10)).isoformat()
             if row[0] else end
         )
         return {
-            "account_id": account["account_id"],
             "start_date": start,
             "end_date": end,
             "benchmark_codes": list(PAPER_BENCHMARKS),
@@ -32,14 +30,11 @@ class PaperBenchmarkMixin:
 
     def save_benchmark_prices(
         self,
-        account_id: str,
         rows: list[dict],
         *,
         source: str = "iFinD THS_HD",
     ) -> dict:
-        self.account(account_id)
-        normalized: list[tuple] = []
-        seen: set[tuple[str, str]] = set()
+        normalized: list[dict] = []
         for row in rows:
             code = _normalize_paper_quote_code(str(row.get("thscode") or ""))
             if code not in PAPER_BENCHMARKS:
@@ -49,36 +44,8 @@ class PaperBenchmarkMixin:
             close = float(row.get("close"))
             if not math.isfinite(close) or close <= 0:
                 raise ValueError(f"指数 {code} 在 {trading_date} 的收盘价无效")
-            key = (code, trading_date)
-            if key in seen:
-                raise ValueError(f"指数基准包含重复日期：{code} {trading_date}")
-            seen.add(key)
-            payload = {
-                "account_id": account_id,
-                "benchmark_code": code,
-                "trading_date": trading_date,
-                "close": close,
-                "source": source,
-            }
-            normalized.append(
-                (account_id, code, trading_date, close, source, canonical_hash(payload), utc_now())
-            )
-        with self.paper_store.connect() as conn:
-            conn.executemany(
-                """INSERT INTO paper_benchmark_price
-                   (account_id, benchmark_code, trading_date, close, source, snapshot_hash, fetched_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(account_id, benchmark_code, trading_date) DO UPDATE SET
-                   close=excluded.close, source=excluded.source,
-                   snapshot_hash=excluded.snapshot_hash, fetched_at=excluded.fetched_at""",
-                normalized,
-            )
-        return {
-            "account_id": account_id,
-            "rows_written": len(normalized),
-            "benchmark_count": len({item[1] for item in normalized}),
-            "source": source,
-        }
+            normalized.append({**row, "thscode": code, "time": trading_date, "close": close})
+        return self.stock_pool_store.save_index_prices(normalized, source=source)
 
     def benchmark_comparison(
         self,
@@ -166,14 +133,16 @@ class PaperBenchmarkMixin:
             portfolio_points.append(live_portfolio_point)
             portfolio_points.sort(key=lambda item: item["date"])
         portfolio_latest = portfolio_points[-1]["cumulative_return"]
-        with self.paper_store.connect() as conn:
-            price_rows = [dict(row) for row in conn.execute(
-                """SELECT benchmark_code, trading_date, close, source, snapshot_hash
-                   FROM paper_benchmark_price
-                   WHERE account_id=? AND trading_date<=?
-                   ORDER BY benchmark_code, trading_date""",
-                (account["account_id"], comparison_end),
-            ).fetchall()]
+        price_rows = [
+            {
+                "benchmark_code": code,
+                "trading_date": row["time"],
+                "close": row["close"],
+                "source": row["source"],
+            }
+            for code in PAPER_BENCHMARKS
+            for row in self.stock_pool_store.index_prices(code, end_date=comparison_end)
+        ]
         by_code: dict[str, dict[str, dict]] = {code: {} for code in PAPER_BENCHMARKS}
         for row in price_rows:
             if row["benchmark_code"] in by_code:

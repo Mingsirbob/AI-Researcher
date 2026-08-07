@@ -48,7 +48,14 @@ def test_shared_migration_journal_contains_all_schema_entries(tmp_path):
         "0012_factor_release",
         "0013_paper_strategies",
         "0016_quant_reference_boundary",
-    ]
+        "0023_paper_realtime_quote_lookup",
+        "0025_strategy_deployment",
+        "0026_factor_catalog_cleanup",
+        "0027_simple_quant_research",
+            "0028_global_index_prices",
+            "0029_deploy_system_lightgbm_strategy",
+            "0030_manual_paper_approval",
+        ]
 
 
 def test_apply_migration_is_idempotent(tmp_path):
@@ -106,6 +113,11 @@ def test_split_databases_keep_independent_migration_journals(tmp_path):
         "0013_paper_strategies",
         "0014_split_paper_trading_database",
         "0015_split_paper_daily_batch_database",
+        "0023_paper_realtime_quote_lookup",
+        "0025_strategy_deployment",
+        "0028_global_index_prices",
+        "0029_deploy_system_lightgbm_strategy",
+        "0030_manual_paper_approval",
     ]
     research_migrations = applied_migrations(research_store.connect)
     assert "0001_research_core" in research_migrations

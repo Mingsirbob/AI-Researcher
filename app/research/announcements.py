@@ -4,12 +4,12 @@ from datetime import date, timedelta
 
 from app.research.documents import DocumentPipelineError, download_pdf, parse_pdf
 from app.research.financials import extract_financial_facts
-from app.integrations.ifind import IFindService
+from app.data.ifind import IFindDataLayer
 from app.research.store import ResearchStore
 
 
 class AnnouncementPipeline:
-    def __init__(self, store: ResearchStore, ifind: IFindService):
+    def __init__(self, store: ResearchStore, ifind: IFindDataLayer):
         self.store = store
         self.ifind = ifind
 
@@ -44,14 +44,15 @@ class AnnouncementPipeline:
             "failed_documents": {},
         }
         try:
-            profile = self.ifind.get_security_profile(code)
+            company_data = self.ifind.get_company_data(
+                [code],
+                as_of=end_date,
+                lookback_days=lookback_days,
+            )
+            profile = company_data["profiles"][0]
             if profile.get("name"):
                 self.store.upsert_security_name(code, profile["name"])
-            announcements = self.ifind.query_announcements(
-                code,
-                start_date.isoformat(),
-                end_date.isoformat(),
-            )
+            announcements = company_data["announcements"].get(code, [])
             result["metadata_received"] = len(announcements)
             announcement_ids = self.store.upsert_announcements(code, announcements)
             result["metadata_upserted"] = len(announcement_ids)

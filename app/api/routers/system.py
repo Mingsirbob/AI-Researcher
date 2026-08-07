@@ -17,6 +17,7 @@ def owns(path: str) -> bool:
 @router.get("/factor-evaluation", include_in_schema=False)
 @router.get("/backtest", include_in_schema=False)
 @router.get("/factor-library", include_in_schema=False)
+@router.get("/strategies", include_in_schema=False)
 @router.get("/decisions", include_in_schema=False)
 @router.get("/acceptance", include_in_schema=False)
 def index() -> Response:
@@ -36,6 +37,7 @@ def next_compatibility_redirect(path: str = "") -> Response:
         "factor-evaluation": "/factor-evaluation",
         "backtest": "/backtest",
         "factor-library": "/factor-library",
+        "strategies": "/strategies",
         "decisions": "/decisions",
         "acceptance": "/acceptance",
     }

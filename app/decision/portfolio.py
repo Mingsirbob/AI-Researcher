@@ -5,6 +5,7 @@ import statistics
 import uuid
 from datetime import date
 
+from app.backtest.market_rules import ChinaAConfig, ChinaAMarketRules
 from app.market.repository import StockRepository, normalize_code
 from app.paper.strategies import (
     DEFAULT_PAPER_STRATEGY_ID,
@@ -19,6 +20,7 @@ from app.research.assessment import (
 )
 from app.research.store import ResearchStore
 from app.quant.store import QuantStore
+from app.strategy.code_runtime import CodeStrategyRuntime
 
 
 STRATEGY_VERSION = "paper-evidence-risk-v3.2"
@@ -45,18 +47,28 @@ class PortfolioDecisionService:
         repository: StockRepository,
         store: QuantStore,
         research_store: ResearchStore | None = None,
+        stock_pool_store=None,
+        code_runtime: CodeStrategyRuntime | None = None,
     ) -> None:
         self.repository = repository
         self.store = store
         self.research_store = research_store or store
+        self.stock_pool_store = stock_pool_store
+        self.code_runtime = code_runtime or CodeStrategyRuntime()
 
-    def sources(self, as_of: str) -> tuple[dict, dict]:
+    def sources(self, as_of: str, strategy: dict | None = None) -> tuple[dict, dict]:
         date.fromisoformat(as_of)
         factor = self.store.latest_compatible_factor_snapshot(as_of)
         shadow = self.store.current_shadow_for_date(as_of)
         if not factor or factor["as_of"] != as_of:
             raise ValueError(f"缺少 {as_of} 的全市场因子快照")
-        if not shadow or shadow["as_of"] != as_of or shadow["status"] != "current_shadow_ready":
+        if strategy and strategy.get("signal_source") in {"multifactor_linear", "python_code"}:
+            shadow = {
+                "snapshot_id": factor["snapshot_id"], "as_of": as_of,
+                "status": "not_required", "universe_size": factor["passed_securities"],
+                "signal_count": factor["passed_securities"],
+            }
+        elif not shadow or shadow["as_of"] != as_of or shadow["status"] != "current_shadow_ready":
             raise ValueError(f"缺少 {as_of} 且通过数据合同的 Current Shadow")
         return factor, shadow
 
@@ -130,8 +142,164 @@ class PortfolioDecisionService:
             item["percentile"] = 1.0 if size == 1 else 1 - (index - 1) / (size - 1)
         return scored
 
-    def strategy_signals(self, factor: dict, shadow: dict, strategy: dict) -> list[dict]:
-        if strategy["strategy_id"] == MULTIFACTOR_LINEAR_STRATEGY_ID:
+    def _resolve_exposure(
+        self,
+        *,
+        strategy: dict,
+        factor_snapshot_id: str,
+        signals: list[dict],
+        requested_exposure: float,
+    ) -> dict:
+        config = strategy.get("config") or {}
+        mode = config.get("exposure_mode", "fixed")
+        if mode != "dynamic":
+            target = float(config.get("target_gross_exposure", requested_exposure))
+            return {
+                "mode": "fixed",
+                "regime": "fixed",
+                "target_gross_exposure": target,
+            }
+
+        metrics = self._factor_metrics(
+            factor_snapshot_id,
+            [item["security_code"] for item in signals],
+        )
+        valid_returns = [
+            float(item["return_20d"])
+            for item in metrics.values()
+            if item.get("return_20d") is not None
+            and math.isfinite(float(item["return_20d"]))
+        ]
+        valid_volatility = [
+            float(item["volatility_60d"])
+            for item in metrics.values()
+            if item.get("volatility_60d") is not None
+            and math.isfinite(float(item["volatility_60d"]))
+        ]
+        breadth = (
+            sum(value > 0 for value in valid_returns) / len(valid_returns)
+            if valid_returns else 0.0
+        )
+        median_volatility = statistics.median(valid_volatility) if valid_volatility else 1.0
+        bullish = float(config.get("bullish_breadth_threshold", 0.6))
+        bearish = float(config.get("bearish_breadth_threshold", 0.4))
+        high_volatility = float(config.get("high_volatility_threshold", 0.5))
+        if breadth <= bearish or median_volatility >= high_volatility:
+            regime = "defensive"
+            target = float(config.get("minimum_exposure", 0.2))
+        elif breadth >= bullish:
+            regime = "bullish"
+            target = float(config.get("maximum_exposure", 0.8))
+        else:
+            regime = "neutral"
+            target = float(config.get("neutral_exposure", 0.5))
+        return {
+            "mode": "dynamic",
+            "regime": regime,
+            "target_gross_exposure": target,
+            "market_breadth_20d": breadth,
+            "median_volatility_60d": median_volatility,
+            "observations": min(len(valid_returns), len(valid_volatility)),
+            "thresholds": {
+                "bullish_breadth": bullish,
+                "bearish_breadth": bearish,
+                "high_volatility": high_volatility,
+            },
+        }
+
+    @staticmethod
+    def _market_rules(strategy: dict) -> ChinaAMarketRules:
+        config = strategy.get("config") or {}
+        return ChinaAMarketRules(ChinaAConfig(
+            commission_rate=float(config.get("commission_rate", COMMISSION_RATE)),
+            minimum_commission=float(config.get("minimum_commission", MIN_COMMISSION)),
+            stamp_duty_rate=float(config.get("stamp_duty_rate", SELL_STAMP_DUTY_RATE)),
+            transfer_fee_rate=float(config.get("transfer_fee_rate", 0.00001)),
+            slippage_rate=float(config.get("slippage_rate", SLIPPAGE_RATE)),
+            lot_size=int(config.get("lot_size", 100)),
+            max_volume_participation=float(config.get("max_volume_participation", 0.1)),
+        ))
+
+    def _code_signals(
+        self,
+        factor: dict,
+        strategy: dict,
+        *,
+        account: dict | None = None,
+        positions: list[dict] | None = None,
+    ) -> list[dict]:
+        source = strategy.get("source_code")
+        if not source:
+            raise ValueError("代码策略版本缺少 source_code")
+        config = strategy.get("config") or {}
+        pool_id = str(config.get("pool_id") or "csi300")
+        if self.stock_pool_store:
+            pool = self.stock_pool_store.resolve(pool_id, date.fromisoformat(factor["as_of"]))
+            universe = pool["members"]
+        else:
+            pool = {"pool_id": pool_id, "as_of": factor["as_of"]}
+            universe = []
+        allowed = {item["security_code"] for item in universe}
+        with self.store.connect() as conn:
+            rows = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT f.*, COALESCE(m.security_name, f.security_code) security_name,
+                              m.industry_l1
+                       FROM security_factor_snapshot f
+                       LEFT JOIN security_master m ON m.security_code=f.security_code
+                       WHERE f.snapshot_id=? AND f.quality_status='passed'
+                       ORDER BY f.security_code""",
+                    (factor["snapshot_id"],),
+                ).fetchall()
+            ]
+        if not universe:
+            universe = [
+                {"security_code": row["security_code"], "security_name": row["security_name"], "weight": None}
+                for row in rows
+            ]
+            allowed = {item["security_code"] for item in universe}
+        factors = [row for row in rows if row["security_code"] in allowed]
+        raw = self.code_runtime.execute(source, {
+            "as_of": factor["as_of"],
+            "universe": universe,
+            "factors": factors,
+            "positions": positions or [],
+            "cash": float((account or {}).get("cash", 0.0)),
+            "params": config.get("strategy_params") or {},
+            "pool_snapshot": {"pool_id": pool_id, "as_of": pool.get("as_of")},
+            "filter_pipeline_id": config.get("filter_pipeline_id", "factor_quality_passed"),
+        })
+        names = {row["security_code"]: row["security_name"] for row in factors}
+        scored = [
+            {
+                **item,
+                "security_name": names.get(item["security_code"], item["security_code"]),
+                "source_instrument": None,
+                "factor_contributions": {"python_code": item["score"]},
+            }
+            for item in raw
+        ]
+        scored.sort(key=lambda item: (-item["score"], item["security_code"]))
+        size = len(scored)
+        for index, item in enumerate(scored, start=1):
+            item["cross_section_rank"] = index
+            item["cross_section_size"] = size
+            item["percentile"] = 1.0 if size == 1 else 1 - (index - 1) / (size - 1)
+        return scored
+
+    def strategy_signals(
+        self,
+        factor: dict,
+        shadow: dict,
+        strategy: dict,
+        *,
+        account: dict | None = None,
+        positions: list[dict] | None = None,
+    ) -> list[dict]:
+        if strategy.get("signal_source") == "python_code":
+            return self._code_signals(factor, strategy, account=account, positions=positions)
+        if strategy.get("signal_source") == "multifactor_linear":
             return self._multifactor_signals(factor["snapshot_id"], strategy)
         return self.store.list_current_shadow_signals(
             shadow["snapshot_id"], limit=min(500, int(shadow["signal_count"]))
@@ -253,7 +421,10 @@ class PortfolioDecisionService:
                 break
         return weights
 
-    def evaluate_candidates(self, signals: list[dict], factor_snapshot_id: str, as_of: str) -> list[dict]:
+    def evaluate_candidates(
+        self, signals: list[dict], factor_snapshot_id: str, as_of: str,
+        *, research_enabled: bool = True,
+    ) -> list[dict]:
         metrics = self._factor_metrics(factor_snapshot_id, [item["security_code"] for item in signals])
         evaluations = []
         for signal in signals:
@@ -268,7 +439,10 @@ class PortfolioDecisionService:
                 {"name": "drawdown", "passed": float(factor.get("max_drawdown_250d") or -1) >= -MAX_DRAWDOWN_250D_ABS, "observed": factor.get("max_drawdown_250d"), "expected": f">= {-MAX_DRAWDOWN_250D_ABS}"},
                 {"name": "tradability", "passed": tradability["passed"], "observed": tradability.get("reason") or "tradable", "expected": "positive OHLC and volume on as_of"},
             ]
-            artifact = self.research_store.latest_research_assessment(code, as_of)
+            artifact = (
+                self.research_store.latest_research_assessment(code, as_of)
+                if research_enabled else None
+            )
             assessment = artifact["payload"] if artifact else None
             assessment_valid = bool(
                 artifact
@@ -277,7 +451,10 @@ class PortfolioDecisionService:
                 and assessment.get("policy_version") == RESEARCH_ASSESSMENT_POLICY_VERSION
                 and canonical_hash(assessment) == artifact["snapshot_hash"]
             )
-            assessment_signal = assessment.get("signal") if assessment_valid else "defer"
+            assessment_signal = (
+                assessment.get("signal") if assessment_valid
+                else "admit" if not research_enabled else "defer"
+            )
             if assessment_signal not in SIGNAL_MULTIPLIERS:
                 assessment_signal = "defer"
                 assessment_valid = False
@@ -293,15 +470,18 @@ class PortfolioDecisionService:
                 "material_negative_count": len(assessment.get("material_negatives", [])) if assessment_valid else 0,
                 "catalyst_count": len(assessment.get("catalysts", [])) if assessment_valid else 0,
                 "invalidating_conditions": assessment.get("invalidating_conditions", []) if assessment_valid else [],
-                "reasons": assessment.get("reasons", []) if assessment_valid else [
-                    "缺少当日、当前策略且哈希有效的 ResearchAssessment"
-                ],
+                "reasons": assessment.get("reasons", []) if assessment_valid else (
+                    ["策略未启用研究过滤，按量化信号直接进入组合门禁"]
+                    if not research_enabled else
+                    ["缺少当日、当前策略且哈希有效的 ResearchAssessment"]
+                ),
                 "snapshot_hash": artifact["snapshot_hash"] if artifact else None,
-                "valid": assessment_valid,
+                "valid": assessment_valid or not research_enabled,
             }
             research_gate = {
                 "name": "research_assessment",
-                "passed": assessment_valid and assessment_signal in {"admit", "reduce"},
+                "passed": (assessment_valid or not research_enabled)
+                and assessment_signal in {"admit", "reduce"},
                 "observed": assessment_signal,
                 "expected": "admit or reduce with current policy and valid hash",
             }
@@ -331,9 +511,12 @@ class PortfolioDecisionService:
     def research_targets(
         self, *, as_of: str, strategy: dict, limit: int = 5, hold_rank_buffer: int = 30
     ) -> dict:
-        factor, shadow = self.sources(as_of)
+        factor, shadow = self.sources(as_of, strategy)
         signals = self.strategy_signals(factor, shadow, strategy)[:hold_rank_buffer]
-        evaluations = self.evaluate_candidates(signals, factor["snapshot_id"], as_of)
+        evaluations = self.evaluate_candidates(
+            signals, factor["snapshot_id"], as_of,
+            research_enabled=strategy.get("research_enabled", True),
+        )
         targets = [item for item in evaluations if item["risk_status"] == "passed"][:limit]
         return {
             "as_of": as_of,
@@ -357,10 +540,10 @@ class PortfolioDecisionService:
         self, *, account_id: str, positions: list[dict], as_of: str, strategy: dict | None = None
     ) -> dict:
         strategy = strategy or strategy_definition(DEFAULT_PAPER_STRATEGY_ID)
-        factor, shadow = self.sources(as_of)
+        factor, shadow = self.sources(as_of, strategy)
         strategy_signal_by_code = {
             item["security_code"]: item
-            for item in self.strategy_signals(factor, shadow, strategy)
+            for item in self.strategy_signals(factor, shadow, strategy, positions=positions)
         }
         signals = []
         shadow_covered: dict[str, bool] = {}
@@ -377,7 +560,10 @@ class PortfolioDecisionService:
                 "cross_section_size": shadow["universe_size"],
                 "percentile": None,
             })
-        evaluations = self.evaluate_candidates(signals, factor["snapshot_id"], as_of)
+        evaluations = self.evaluate_candidates(
+            signals, factor["snapshot_id"], as_of,
+            research_enabled=strategy.get("research_enabled", True),
+        )
         positions_by_code = {item["security_code"]: item for item in positions}
         items = []
         for evaluation in evaluations:
@@ -429,12 +615,27 @@ class PortfolioDecisionService:
         strategy: dict | None = None,
     ) -> dict:
         strategy = strategy or strategy_definition(DEFAULT_PAPER_STRATEGY_ID)
-        factor, shadow = self.sources(as_of)
+        factor, shadow = self.sources(as_of, strategy)
         position_by_code = {item["security_code"]: item for item in positions}
-        all_signals = self.strategy_signals(factor, shadow, strategy)
+        all_signals = self.strategy_signals(
+            factor, shadow, strategy, account=account, positions=positions
+        )
+        exposure = self._resolve_exposure(
+            strategy=strategy,
+            factor_snapshot_id=factor["snapshot_id"],
+            signals=all_signals,
+            requested_exposure=target_gross_exposure,
+        )
+        target_gross_exposure = exposure["target_gross_exposure"]
+        rules = self._market_rules(strategy)
         signals = all_signals[:hold_rank_buffer]
-        signal_by_code = {item["security_code"]: item for item in signals}
+        buffered_codes = {item["security_code"] for item in signals}
         all_signal_by_code = {item["security_code"]: item for item in all_signals}
+        rank_exit_codes = {
+            code for code in position_by_code
+            if code in all_signal_by_code and code not in buffered_codes
+        }
+        signal_by_code = {item["security_code"]: item for item in signals}
         holding_shadow_covered = {}
         for position in positions:
             code = position["security_code"]
@@ -450,7 +651,8 @@ class PortfolioDecisionService:
                 "percentile": None,
             })
         evaluations = self.evaluate_candidates(
-            list(signal_by_code.values()), factor["snapshot_id"], as_of
+            list(signal_by_code.values()), factor["snapshot_id"], as_of,
+            research_enabled=strategy.get("research_enabled", True),
         )
         rank_by_code = {item["security_code"]: item for item in evaluations}
         market_value = sum(item["market_value"] or 0 for item in positions)
@@ -458,6 +660,8 @@ class PortfolioDecisionService:
         config = {
             "max_positions": top_n,
             "target_gross_exposure": target_gross_exposure,
+            "exposure_mode": exposure["mode"],
+            "exposure_decision": exposure,
             "min_position_weight": DEFAULT_MIN_POSITION_WEIGHT,
             "max_position_weight": max_position_weight,
             "max_industry_weight": max_industry_weight,
@@ -468,12 +672,19 @@ class PortfolioDecisionService:
             "minimum_avg_traded_value_20d": MIN_AVG_TRADED_VALUE_20D,
             "maximum_volatility_60d": MAX_VOLATILITY_60D,
             "maximum_drawdown_250d_abs": MAX_DRAWDOWN_250D_ABS,
-            "commission_rate": COMMISSION_RATE,
-            "min_commission": MIN_COMMISSION,
-            "sell_stamp_duty_rate": SELL_STAMP_DUTY_RATE,
-            "slippage_rate": SLIPPAGE_RATE,
+            "market": "CN_A",
+            "market_rules_version": "china-a-v1",
+            "commission_rate": rules.config.commission_rate,
+            "minimum_commission": rules.config.minimum_commission,
+            "stamp_duty_rate": rules.config.stamp_duty_rate,
+            "transfer_fee_rate": rules.config.transfer_fee_rate,
+            "slippage_rate": rules.config.slippage_rate,
             "execution": "first_available_open_after_as_of",
-            "lot_size": 100,
+            "lot_size": rules.config.lot_size,
+            "max_volume_participation": rules.config.max_volume_participation,
+            "approval_mode": "manual",
+            "auto_run": bool(strategy.get("config", {}).get("auto_run", False)),
+            "run_time": strategy.get("config", {}).get("run_time"),
             "research_assessment_policy": RESEARCH_ASSESSMENT_POLICY_VERSION,
             "strategy_id": strategy["strategy_id"],
             "strategy_version": strategy["version"],
@@ -483,10 +694,13 @@ class PortfolioDecisionService:
         industry_counts: dict[str, int] = {}
         frozen_codes = {
             code for code in position_by_code
-            if not holding_shadow_covered.get(code, False)
+            if code not in rank_exit_codes
+            and (
+                not holding_shadow_covered.get(code, False)
             or (
                 rank_by_code[code]["risk_status"] == "passed"
                 and rank_by_code[code]["research_status"] == "defer"
+            )
             )
         }
         eligible = [
@@ -494,6 +708,7 @@ class PortfolioDecisionService:
             if item["risk_status"] == "passed"
             and item["research_status"] in {"admit", "reduce"}
             and item["security_code"] not in frozen_codes
+            and item["security_code"] not in rank_exit_codes
         ]
         existing_eligible = [item for item in eligible if item["security_code"] in position_by_code]
         new_eligible = sorted(
@@ -564,6 +779,9 @@ class PortfolioDecisionService:
                 "evaluated": len(positions),
                 "frozen": len(frozen_codes),
                 "frozen_codes": sorted(frozen_codes),
+                "rank_exit_count": len(rank_exit_codes),
+                "rank_exit_codes": sorted(rank_exit_codes),
+                "hold_rank_buffer": hold_rank_buffer,
                 "occupied_slots": len(selected) + len(frozen_codes),
                 "new_entries_blocked_when_full": True,
             },
@@ -582,6 +800,7 @@ class PortfolioDecisionService:
                 "selected": len(selected),
                 "note": "行业字段缺失时使用60日收益相关性上限作为降级集中度约束。",
             },
+            "exposure_control": exposure,
         }
         snapshot = {
             "account_id": account["account_id"],
@@ -625,15 +844,18 @@ class PortfolioDecisionService:
             code = candidate["security_code"]
             price = float(candidate["close"])
             target_weight = candidate["target_weight"]
-            target_qty = math.floor((nav * target_weight) / price / 100) * 100
+            target_qty = rules.round_buy_quantity((nav * target_weight) / price)
             current_qty = int((position_by_code.get(code) or {}).get("quantity") or 0)
             if current_qty and candidate["research_status"] == "reduce":
                 target_qty = min(target_qty, current_qty)
             delta = target_qty - current_qty
             if delta < 0:
                 available = int((position_by_code.get(code) or {}).get("available_quantity") or 0)
-                qty = min(-delta, available)
-                if qty >= 100:
+                qty = min(
+                    rules.round_sell_quantity(-delta, liquidating=target_qty == 0),
+                    available,
+                )
+                if qty > 0:
                     orders.append(self._order(
                         run_id, account["account_id"], code, "sell", qty, price, target_weight,
                         {
@@ -650,14 +872,21 @@ class PortfolioDecisionService:
                     ))
                 continue
             qty = delta
-            affordable = math.floor(
-                max(0, account["cash"] - reserved_cash - MIN_COMMISSION)
-                / (price * (1 + SLIPPAGE_RATE + COMMISSION_RATE)) / 100
-            ) * 100
+            estimated_price = rules.execution_price("buy", price)
+            available_cash = max(0, account["cash"] - reserved_cash)
+            affordable = rules.round_buy_quantity(available_cash / estimated_price)
+            while affordable > 0 and (
+                affordable * estimated_price
+                + rules.fee("buy", affordable, estimated_price)
+                > available_cash + 1e-8
+            ):
+                affordable -= rules.config.lot_size
             qty = min(qty, affordable)
-            if qty < 100:
+            if qty < rules.config.lot_size:
                 continue
-            reserved_cash += qty * price * (1 + SLIPPAGE_RATE + COMMISSION_RATE)
+            reserved_cash += (
+                qty * estimated_price + rules.fee("buy", qty, estimated_price)
+            )
             orders.append(self._order(
                 run_id, account["account_id"], code, "buy", qty, price, target_weight,
                 {
