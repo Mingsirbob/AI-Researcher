@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from contextlib import suppress
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -25,10 +26,6 @@ from app.integrations.llm import (
 from app.thesis.monitoring import build_monitor_evaluations, run_artifacts
 from app.quant.factors import FactorSnapshotService
 from app.quant.research import neutralize_factor, universe_membership
-from app.quant.factor_lab import FactorLabService
-from app.quant.factor_evaluation import FactorEvaluationService
-from app.quant.factor_backtest import FactorBacktestService
-from app.quant.factor_release import FactorReleaseService
 from app.data.ifind import IFindDataError
 from app.research.announcements import AnnouncementPipeline
 from app.research.financials import build_financial_change_template
@@ -75,12 +72,6 @@ from app.schemas import (
     ClaimEvaluationConfirm,
     FactorSnapshotRequest,
     FactorDefinitionCreate,
-    FactorLifecycleChange,
-    FactorLabSnapshotRequest,
-    FactorEvaluationRequest,
-    FactorBacktestRequest,
-    FactorReleaseCreate,
-    FactorReleaseDecision,
     FinancialChangeTemplateRequest,
     ResearchRequest,
     ResearchRunRequest,
@@ -110,12 +101,7 @@ strategy_service = container.strategy_service
 company_research_service = container.company_research_service
 announcement_pipeline = container.announcement_pipeline
 factor_snapshot_service = container.factor_snapshot_service
-factor_lab_repository = container.factor_lab_repository
-factor_lab_service = container.factor_lab_service
-simple_research_catalog = factor_lab_service.simple_catalog
-factor_evaluation_service = container.factor_evaluation_service
-factor_backtest_service = container.factor_backtest_service
-factor_release_service = container.factor_release_service
+simple_research_catalog = container.simple_research_catalog
 evidence_acceptance_service = container.evidence_acceptance_service
 decision_case_service = container.decision_case_service
 decision_outcome_service = container.decision_outcome_service
@@ -388,6 +374,11 @@ async def run_daily_research_batch(
 ) -> None:
     account = paper_trading_service.account(account_id)
     strategy = account["strategy"]
+    workspace = container.runtime_root / "batches" / batch_id
+    if workspace.exists():
+        shutil.rmtree(workspace, ignore_errors=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    quant_store.clear_daily_runtime(as_of)
     async def market_data_step() -> dict:
         result = await run_in_threadpool(ensure_market_data, as_of)
         try:
@@ -429,6 +420,7 @@ async def run_daily_research_batch(
                 lookback_days=request.shadow_lookback_days,
                 batch_size=request.shadow_batch_size,
                 trust_pickle=True,
+                workspace=workspace,
             )
         )
         if snapshot["status"] != "current_shadow_ready" or snapshot["as_of"] != as_of:
@@ -443,6 +435,8 @@ async def run_daily_research_batch(
             "signal_count": snapshot["signal_count"],
             "coverage": snapshot["coverage"],
             "reused": snapshot.get("reused", False),
+            "score_storage": "temporary_csv",
+            "score_file": "lightgbm_scores.csv",
         }
 
     async def candidate_research_step() -> dict:
@@ -539,14 +533,19 @@ async def run_daily_research_batch(
             "reused": run.get("reused", False),
         }
 
-    await daily_batch_runner.run(batch_id, {
-        "market_data": market_data_step,
-        "factor_snapshot": factor_snapshot_step,
-        "current_shadow": current_shadow_step,
-        "candidate_research": candidate_research_step,
-        "holdings_review": holdings_review_step,
-        "order_proposals": order_proposals_step,
-    })
+    try:
+        await daily_batch_runner.run(batch_id, {
+            "market_data": market_data_step,
+            "factor_snapshot": factor_snapshot_step,
+            "current_shadow": current_shadow_step,
+            "candidate_research": candidate_research_step,
+            "holdings_review": holdings_review_step,
+            "order_proposals": order_proposals_step,
+        })
+    finally:
+        quant_store.clear_daily_runtime(as_of)
+        (workspace / "lightgbm_scores.csv").unlink(missing_ok=True)
+        shutil.rmtree(workspace, ignore_errors=True)
 
 
 def _completed_run(run_id: str, security_code: str) -> dict:

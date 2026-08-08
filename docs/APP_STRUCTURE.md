@@ -49,7 +49,7 @@ app/
 
 - `app/data/ifind.py` 是当前 iFinD 入口；旧 `app/integrations/ifind.py` 不再存在。
 - `app/integrations/llm.py` 服务于研究报告等既有模型调用；`app/llm/` 服务于策略代码生成。两者尚未合并为通用 Agent 平台。
-- `app/backtest/` 提供共享撮合内核；因子回测的业务持久化仍由 `app/quant/factor_backtest.py` 负责。
+- `app/backtest/` 提供共享回测内核；统一结果由 `quant_backtest` 保存。
 - `app/strategy/` 负责策略版本，`app/paper/` 只保存账户部署关系和执行状态。
 - `app/workflows/daily_batch.py` 只编排步骤，不拥有行情、研究、量化或模拟盘领域数据。
 
@@ -83,7 +83,8 @@ data/
 |- stock_data_hfq.db     # 后复权研究行情（按需构建）
 |- stock_pool.db         # 股票池定义和日期化成分快照
 |- research_state.db     # 研究证据、文档、Thesis、决策和运行事件
-|- quant_research.db     # 因子、模型、回测和策略版本
+|- quant_research.db     # 精简研究库：因子、策略和回测
+|- runtime_tmp/          # 每次启动和研究批次的临时数据，结束后自动清理
 |- paper_trading.db      # 模拟账户、批次、订单、持仓、净值和行情快照
 |- documents/            # 下载文档及解析产物
 |- model_artifacts/      # 模型产物

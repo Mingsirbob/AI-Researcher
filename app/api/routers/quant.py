@@ -6,7 +6,7 @@ router = domain_router()
 
 def owns(path: str) -> bool:
     return (
-        path.startswith("/api/factor-")
+        path.startswith("/api/factor-snapshots")
         or path.startswith("/api/quant-research")
         or path.startswith("/api/model-runs")
         or path.startswith("/api/current-shadow")
@@ -25,10 +25,15 @@ def quant_research_factor_sets() -> dict:
     return {"items": simple_research_catalog.factor_sets()}
 
 
+@router.get("/api/quant-research/factor-templates")
+def quant_research_factor_templates() -> dict:
+    return {"items": simple_research_catalog.templates()}
+
+
 @router.get("/api/quant-research/factors")
 def quant_research_factors(
     factor_set_id: str | None = None,
-    status: str | None = Query(None, pattern="^(draft|active|disabled)$"),
+    status: str | None = Query(None, pattern="^(active|disabled)$"),
 ) -> dict:
     return {
         "items": simple_research_catalog.factors(
@@ -38,11 +43,12 @@ def quant_research_factors(
     }
 
 
-@router.get("/api/quant-research/models")
-def quant_research_models(
-    status: str | None = Query(None, pattern="^(draft|active|disabled|failed)$"),
-) -> dict:
-    return {"items": simple_research_catalog.models(status=status)}
+@router.post("/api/quant-research/factors", status_code=201)
+def create_quant_factor(request: FactorDefinitionCreate) -> dict:
+    try:
+        return {"item": simple_research_catalog.create_factor(**request.model_dump())}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/api/quant-research/experiments")
@@ -60,6 +66,11 @@ def quant_research_experiments(
             limit=limit,
         )
     }
+
+
+@router.get("/api/quant-research/backtests/latest")
+def latest_quant_backtest() -> dict:
+    return {"item": simple_research_catalog.latest_backtest()}
 
 
 @router.get("/api/quant-research/experiments/{experiment_id}")
@@ -147,225 +158,6 @@ def factor_snapshot_securities(
     )
     result["snapshot"] = snapshot
     return result
-
-
-@router.get("/api/factor-lab/overview")
-def factor_lab_overview() -> dict:
-    return factor_lab_service.overview()
-
-
-@router.get("/api/factor-lab/templates")
-def factor_lab_templates() -> dict:
-    return {"items": factor_lab_service.templates()}
-
-
-@router.get("/api/factor-lab/factors")
-def factor_lab_factors(
-    status: str | None = Query(
-        None, pattern="^(draft|testing|shadow|approved|deprecated)$"
-    ),
-) -> dict:
-    return {"items": factor_lab_service.list_factors(status)}
-
-
-@router.post("/api/factor-lab/factors")
-def create_factor_definition(request: FactorDefinitionCreate) -> dict:
-    try:
-        return {
-            "item": factor_lab_service.create_factor(
-                factor_id=request.factor_id,
-                name=request.name,
-                description=request.description,
-                template_id=request.template_id,
-                window=request.window,
-                direction=request.direction,
-                owner=request.owner,
-            )
-        }
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@router.post("/api/factor-lab/factors/{factor_id}/versions/{version}/status")
-def change_factor_lifecycle(
-    factor_id: str, version: int, request: FactorLifecycleChange
-) -> dict:
-    try:
-        return {
-            "item": factor_lab_service.change_status(
-                factor_id, version, request.to_status, request.reviewer, request.note
-            )
-        }
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@router.post("/api/factor-lab/snapshots")
-async def generate_factor_lab_snapshot(request: FactorLabSnapshotRequest) -> dict:
-    as_of = request.as_of or research_store.market_data_end()
-    if as_of is None:
-        raise HTTPException(status_code=409, detail="本地行情库没有可用截止日")
-    try:
-        return await run_in_threadpool(factor_lab_service.generate_snapshot, as_of)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"实验室因子快照生成失败：{exc}") from exc
-
-
-@router.get("/api/factor-lab/snapshots/latest")
-def latest_factor_lab_snapshot() -> dict:
-    return {"item": factor_lab_service.latest_snapshot()}
-
-
-@router.get("/api/factor-lab/snapshots/{snapshot_id}/values")
-def factor_lab_snapshot_values(
-    snapshot_id: str,
-    factor_id: str,
-    limit: int = Query(100, ge=1, le=500),
-) -> dict:
-    try:
-        return factor_lab_service.snapshot_values(snapshot_id, factor_id, limit)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.post("/api/factor-lab/evaluations")
-async def run_factor_evaluation(request: FactorEvaluationRequest) -> dict:
-    if factor_evaluation_service is None:
-        raise HTTPException(status_code=409, detail="缺少 stock_data_qfq.db，无法运行正式因子评价")
-    end_date = request.end_date or research_store.market_data_end()
-    if end_date is None:
-        raise HTTPException(status_code=409, detail="没有可用行情截止日")
-    try:
-        return await run_in_threadpool(
-            factor_evaluation_service.run,
-            start_date=request.start_date,
-            end_date=end_date,
-            rebalance_step=request.rebalance_step,
-            horizons=tuple(request.horizons),
-            layer_count=request.layer_count,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"因子评价失败：{exc}") from exc
-
-
-@router.get("/api/factor-lab/evaluations/latest")
-def latest_factor_evaluation() -> dict:
-    return {"item": factor_evaluation_service.latest() if factor_evaluation_service else None}
-
-
-@router.get("/api/factor-lab/evaluations/{evaluation_id}")
-def factor_evaluation(evaluation_id: str) -> dict:
-    if factor_evaluation_service is None:
-        raise HTTPException(status_code=409, detail="缺少 stock_data_qfq.db")
-    item = factor_evaluation_service.evaluation(evaluation_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="因子评价不存在")
-    return item
-
-
-@router.post("/api/factor-lab/backtests")
-async def run_factor_backtest(request: FactorBacktestRequest) -> dict:
-    if factor_backtest_service is None or factor_evaluation_service is None:
-        raise HTTPException(status_code=409, detail="缺少 stock_data_qfq.db，无法运行策略回测")
-    evaluation_id = request.evaluation_id
-    if not evaluation_id:
-        latest = factor_evaluation_service.latest()
-        evaluation_id = latest["run"]["evaluation_id"] if latest else None
-    if not evaluation_id:
-        raise HTTPException(status_code=409, detail="请先完成 M11.2 因子评价")
-    try:
-        return await run_in_threadpool(
-            factor_backtest_service.run,
-            evaluation_id=evaluation_id,
-            factor_id=request.factor_id,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            top_n=request.top_n,
-            rebalance_step=request.rebalance_step,
-            initial_capital=request.initial_capital,
-            commission_rate=request.commission_rate,
-            stamp_duty_rate=request.stamp_duty_rate,
-            slippage_rate=request.slippage_rate,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"策略回测失败：{exc}") from exc
-
-
-@router.get("/api/factor-lab/backtests/latest")
-def latest_factor_backtest() -> dict:
-    return {"item": factor_backtest_service.latest() if factor_backtest_service else None}
-
-
-@router.get("/api/factor-lab/backtests/{backtest_id}")
-def factor_backtest(backtest_id: str) -> dict:
-    if factor_backtest_service is None:
-        raise HTTPException(status_code=409, detail="缺少 stock_data_qfq.db")
-    item = factor_backtest_service.backtest(backtest_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="策略回测不存在")
-    return item
-
-
-@router.post("/api/factor-lab/releases")
-def create_factor_release(request: FactorReleaseCreate) -> dict:
-    try:
-        return factor_release_service.create_candidate(
-            factor_id=request.factor_id,
-            factor_version=request.factor_version,
-            evaluation_id=request.evaluation_id,
-            backtest_id=request.backtest_id,
-            limitations_acknowledged=request.limitations_acknowledged,
-            created_by=request.created_by,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@router.get("/api/factor-lab/releases/latest")
-def latest_factor_releases(limit: int = Query(20, ge=1, le=100)) -> dict:
-    return factor_release_service.latest(limit)
-
-
-@router.get("/api/factor-lab/releases/{release_id}")
-def factor_release(release_id: str) -> dict:
-    item = factor_release_service.release(release_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="发布候选不存在")
-    return item
-
-
-@router.post("/api/factor-lab/releases/{release_id}/approve")
-def approve_factor_release(release_id: str, request: FactorReleaseDecision) -> dict:
-    try:
-        return factor_release_service.decide(
-            release_id, "approve", request.reviewer, request.note
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@router.post("/api/factor-lab/releases/{release_id}/reject")
-def reject_factor_release(release_id: str, request: FactorReleaseDecision) -> dict:
-    try:
-        return factor_release_service.decide(
-            release_id, "reject", request.reviewer, request.note
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/api/model-runs/latest")

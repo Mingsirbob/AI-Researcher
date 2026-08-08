@@ -113,65 +113,6 @@ export interface MaturityItem {
   status: "ready" | "pending" | "completed";
 }
 
-export interface ReleaseGate {
-  name?: string;
-  label?: string;
-  passed: boolean;
-  observed?: unknown;
-  comparator?: string;
-  threshold?: unknown;
-  detail?: string;
-}
-
-export interface FactorRelease {
-  candidate: {
-    release_id: string;
-    factor_id: string;
-    factor_version: number;
-    status: string;
-    blocking_failure_count: number;
-    limitations?: string[];
-    gate_version?: string;
-    result_hash?: string;
-    evaluation_id?: string;
-    evaluation_result_hash?: string;
-    backtest_id?: string;
-    backtest_result_hash?: string;
-    created_by?: string;
-    created_at?: string;
-    decided_at?: string | null;
-  };
-  gates: ReleaseGate[];
-  decisions: Array<{ decision_id: string; decision: string; reviewer: string; note: string; created_at: string }>;
-}
-
-export interface FactorVersion {
-  factor_id: string;
-  version: number;
-  name: string;
-  description?: string;
-  expression?: string;
-  formula?: string;
-  template_id?: string;
-  direction?: string;
-  status?: string;
-  lifecycle_status?: string;
-  model_used?: boolean;
-  category?: string;
-  usage_scope?: "model_bundle" | "strategy_component" | "research_only" | "retired";
-  strategy_compatible?: boolean;
-  strategy_eligible?: boolean;
-  strategy_runtime_field?: string | null;
-}
-
-export interface FactorLabRun {
-  evaluation_id?: string;
-  backtest_id?: string;
-  factor_id?: string;
-  factor_version?: number;
-  end_date?: string;
-}
-
 export interface DecisionArtifact { snapshot_hash?: string; schema_version?: string }
 export interface DecisionCase {
   case_id: string;

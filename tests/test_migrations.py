@@ -2,10 +2,6 @@ import sqlite3
 
 from app.market.repository import StockRepository
 from app.workflows.daily_batch import DailyBatchStore
-from app.quant.factor_lab import FactorLabService
-from app.quant.factor_evaluation import FactorEvaluationService
-from app.quant.factor_backtest import FactorBacktestService
-from app.quant.factor_release import FactorReleaseService
 from app.core.migrations import applied_migrations, apply_migration
 from app.core.observability import IFindCallObserver
 from app.paper.service import PaperExecutionService
@@ -27,12 +23,6 @@ def test_shared_migration_journal_contains_all_schema_entries(tmp_path):
     DailyBatchStore(store)
     RuntimeEventStore(state_db)
     IFindCallObserver(state_db)
-    repository = StockRepository(price_db)
-    factor_lab = FactorLabService(store, repository)
-    factor_evaluation = FactorEvaluationService(store, repository, factor_lab)
-    FactorBacktestService(store, repository, factor_lab, factor_evaluation)
-    FactorReleaseService(store)
-
     assert applied_migrations(store.connect) == [
         "0001_research_core",
         "0002_thesis_monitoring",
@@ -41,21 +31,14 @@ def test_shared_migration_journal_contains_all_schema_entries(tmp_path):
         "0005_runtime_events",
         "0006_ifind_observability",
         "0007_paper_benchmarks",
-        "0008_factor_lab",
-        "0009_factor_evaluation",
-        "0010_factor_qfq_liquidity_contract",
-        "0011_factor_backtest",
-        "0012_factor_release",
         "0013_paper_strategies",
         "0016_quant_reference_boundary",
         "0023_paper_realtime_quote_lookup",
         "0025_strategy_deployment",
-        "0026_factor_catalog_cleanup",
-        "0027_simple_quant_research",
-            "0028_global_index_prices",
-            "0029_deploy_system_lightgbm_strategy",
-            "0030_manual_paper_approval",
-        ]
+        "0028_global_index_prices",
+        "0029_deploy_system_lightgbm_strategy",
+        "0030_manual_paper_approval",
+    ]
 
 
 def test_apply_migration_is_idempotent(tmp_path):

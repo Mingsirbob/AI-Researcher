@@ -64,7 +64,9 @@ npm run dev
 | 前/后复权日线 | `data/stock_data_qfq.db`、`stock_data_hfq.db` | 构建/同步脚本 |
 | 股票池 | `data/stock_pool.db` | `scripts/sync_stock_pools.py` |
 | 研究状态 | `data/research_state.db` | 应用迁移和研究服务 |
-| 因子、模型、回测、策略 | `data/quant_research.db` | 应用迁移和量化/策略服务 |
+| 因子、策略、回测 | `data/quant_research.db` | 精简量化目录与策略服务 |
+| LightGBM 模型 | `data/model_artifacts/*/manifest.json` 与模型文件 | 文件清单和模型产物 |
+| 每日模型评分 | `data/runtime_tmp/` 下的批次临时 CSV | 批次结束自动删除，不留历史评分 |
 | 模拟盘 | `data/paper_trading.db` | 应用迁移和模拟盘服务 |
 
 状态库 Schema 在应用启动和 Store 初始化时执行幂等迁移。不要手工修改表结构，也不要把运行数据库用于测试 fixture。
@@ -175,41 +177,19 @@ python scripts/sync_research_data.py --code 601888.SH --end-date 2026-08-07 --do
 最快可用流程：
 
 1. 在 `/strategies` 输入策略名称、股票池和策略需求。
-2. 大模型生成 `generate_signals(context)` 源码并创建草稿。
-3. 编译检查通过后发布不可变策略版本。
-4. 发布记录写入 `quant_research.db`，文件副本写入 `data/strategy_runs/{draft_id}/v{version}/strategy.py`。
+2. 大模型生成 `generate_signals(context)` 源码。
+3. 基础编译检查通过后直接启用策略。
+4. 策略写入 `quant_strategy`，代码写入 `data/strategy_runs/{strategy_id}/v1/strategy.py`。
 5. 创建模拟账户或更新部署时选择该 `strategy_version_id`。
 6. 每日批次加载该版本，对绑定股池生成评分并形成提案。
 
-数据库中的策略版本和源码是权威记录；`data/strategy_runs/` 用于查看和审计，不能直接改文件来修改已发布策略。需要修改时应创建新草稿并发布新版本。
+`quant_strategy` 是策略元数据的权威记录，`data/strategy_runs/` 是实际代码位置。修改策略时创建一条新策略，模拟账户继续引用原策略 ID，避免运行中代码被静默替换。
 
 代码运行采用 AST 限制、Python 隔离模式子进程、默认 3 秒超时和输出校验。这不是强安全沙箱，只适合本地受信任用户生成的代码。
 
-## 7. 因子评价与回测
+## 7. 因子与回测记录
 
-运行因子评价：
-
-```powershell
-python scripts/run_factor_evaluation.py `
-  --start-date 2021-01-01 `
-  --end-date 2026-08-07 `
-  --rebalance-step 20 `
-  --horizons 1 5 20 `
-  --layers 5
-```
-
-运行单因子 Top-N 回测：
-
-```powershell
-python scripts/run_factor_backtest.py `
-  --factor-id volume_ratio_20d `
-  --start-date 2021-01-01 `
-  --end-date 2026-08-07 `
-  --top-n 30 `
-  --rebalance-step 20
-```
-
-回测使用 `app/backtest/` 共享内核和 A 股规则。结果仍受股票池时点、成交模型、成本、停牌和容量假设限制。当前大模型生成的任意代码策略尚未接入统一前端回测，不要把因子回测结果当作该代码策略的验证结果。
+因子只保留 `quant_factor` 中的当前定义，保存同一 `factor_id` 会直接更新，不再创建版本或发布审查。历史回测统一保存在 `quant_backtest`，前端 `/backtest` 当前提供结果查看；旧因子评价、Top-N 回测和发布脚本已停用。
 
 ## 8. 备份与恢复
 
@@ -220,6 +200,8 @@ $backupDir = "data/backups/$(Get-Date -Format yyyyMMdd-HHmmss)"
 New-Item -ItemType Directory -Path $backupDir
 Copy-Item data/research_state.db,data/quant_research.db,data/paper_trading.db,data/stock_pool.db -Destination $backupDir
 ```
+
+`quant_runtime.db` 已退役。模型元数据随模型文件保存在 manifest；每日因子和评分只服务于当前研究批次，提案写入 `paper_trading.db` 后即清理。
 
 行情库较大，可按变更范围单独备份。恢复时停止服务，用同一时间点的数据库文件整体替换，再启动应用让幂等迁移运行。不要只恢复 `paper_trading.db` 而保留不匹配的策略或研究数据库。
 

@@ -9,7 +9,7 @@
 - 每条结论绑定 Evidence ID、数据日期、来源与计算方法。
 - AI 仅接收已计算证据，并经过 JSON Schema 与证据引用校验。
 - AI 服务不可用时自动降级为确定性报告。
-- 公告、财务、研究、决策、Thesis 与运行审计保存在 `data/research_state.db`；因子、模型、Shadow、评价与回测保存在 `data/quant_research.db`；模拟账户、策略、订单、持仓、净值和每日模拟批次保存在 `data/paper_trading.db`。原行情库始终只读。
+- 公告、财务、研究、决策、Thesis 与运行审计保存在 `data/research_state.db`；当前因子、策略和回测保存在 `data/quant_research.db`；模拟账户、订单、持仓、净值和每日模拟批次保存在 `data/paper_trading.db`。LightGBM 模型使用文件 manifest，单次批次评分使用临时 CSV，不保留历史评分。原行情库始终只读。
 
 首次使用拆分版本启动时，迁移 `0014_split_paper_trading_database` 和
 `0015_split_paper_daily_batch_database` 会把旧状态库中的模拟盘数据幂等复制到
@@ -198,11 +198,9 @@ pytest -q
 - `GET /api/model-runs/{model_run_id}/validation`
 - `GET /api/current-shadow/latest`
 - `GET /api/current-shadow/{snapshot_id}/signals`
-- `POST /api/factor-lab/releases`
-- `GET /api/factor-lab/releases/latest`
-- `GET /api/factor-lab/releases/{release_id}`
-- `POST /api/factor-lab/releases/{release_id}/approve`
-- `POST /api/factor-lab/releases/{release_id}/reject`
+- `GET|POST /api/quant-research/factors`
+- `GET /api/quant-research/factor-templates`
+- `GET /api/quant-research/backtests/latest`
 - `POST /api/paper/daily-batches`
 - `GET /api/paper/daily-batches/latest`
 - `GET /api/paper/daily-batches/{batch_id}`

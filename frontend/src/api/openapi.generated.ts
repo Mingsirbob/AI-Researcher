@@ -396,6 +396,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/quant-research/factor-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Quant Research Factor Templates */
+        get: operations["quant_research_factor_templates_api_quant_research_factor_templates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/quant-research/factors": {
         parameters: {
             query?: never;
@@ -406,24 +423,8 @@ export interface paths {
         /** Quant Research Factors */
         get: operations["quant_research_factors_api_quant_research_factors_get"];
         put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/quant-research/models": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Quant Research Models */
-        get: operations["quant_research_models_api_quant_research_models_get"];
-        put?: never;
-        post?: never;
+        /** Create Quant Factor */
+        post: operations["create_quant_factor_api_quant_research_factors_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -439,6 +440,23 @@ export interface paths {
         };
         /** Quant Research Experiments */
         get: operations["quant_research_experiments_api_quant_research_experiments_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/quant-research/backtests/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Latest Quant Backtest */
+        get: operations["latest_quant_backtest_api_quant_research_backtests_latest_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -543,313 +561,6 @@ export interface paths {
         get: operations["factor_snapshot_securities_api_factor_snapshots__snapshot_id__securities_get"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/overview": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Factor Lab Overview */
-        get: operations["factor_lab_overview_api_factor_lab_overview_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/templates": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Factor Lab Templates */
-        get: operations["factor_lab_templates_api_factor_lab_templates_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/factors": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Factor Lab Factors */
-        get: operations["factor_lab_factors_api_factor_lab_factors_get"];
-        put?: never;
-        /** Create Factor Definition */
-        post: operations["create_factor_definition_api_factor_lab_factors_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/factors/{factor_id}/versions/{version}/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Change Factor Lifecycle */
-        post: operations["change_factor_lifecycle_api_factor_lab_factors__factor_id__versions__version__status_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/snapshots": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Generate Factor Lab Snapshot */
-        post: operations["generate_factor_lab_snapshot_api_factor_lab_snapshots_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/snapshots/latest": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Latest Factor Lab Snapshot */
-        get: operations["latest_factor_lab_snapshot_api_factor_lab_snapshots_latest_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/snapshots/{snapshot_id}/values": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Factor Lab Snapshot Values */
-        get: operations["factor_lab_snapshot_values_api_factor_lab_snapshots__snapshot_id__values_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/evaluations": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Run Factor Evaluation */
-        post: operations["run_factor_evaluation_api_factor_lab_evaluations_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/evaluations/latest": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Latest Factor Evaluation */
-        get: operations["latest_factor_evaluation_api_factor_lab_evaluations_latest_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/evaluations/{evaluation_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Factor Evaluation */
-        get: operations["factor_evaluation_api_factor_lab_evaluations__evaluation_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/backtests": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Run Factor Backtest */
-        post: operations["run_factor_backtest_api_factor_lab_backtests_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/backtests/latest": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Latest Factor Backtest */
-        get: operations["latest_factor_backtest_api_factor_lab_backtests_latest_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/backtests/{backtest_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Factor Backtest */
-        get: operations["factor_backtest_api_factor_lab_backtests__backtest_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/releases": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Create Factor Release */
-        post: operations["create_factor_release_api_factor_lab_releases_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/releases/latest": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Latest Factor Releases */
-        get: operations["latest_factor_releases_api_factor_lab_releases_latest_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/releases/{release_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Factor Release */
-        get: operations["factor_release_api_factor_lab_releases__release_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/releases/{release_id}/approve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Approve Factor Release */
-        post: operations["approve_factor_release_api_factor_lab_releases__release_id__approve_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/factor-lab/releases/{release_id}/reject": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Reject Factor Release */
-        post: operations["reject_factor_release_api_factor_lab_releases__release_id__reject_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1861,47 +1572,6 @@ export interface components {
              */
             scope: "all" | "financial_reports" | "announcements";
         };
-        /** FactorBacktestRequest */
-        FactorBacktestRequest: {
-            /** Evaluation Id */
-            evaluation_id?: string | null;
-            /** Factor Id */
-            factor_id: string;
-            /** Start Date */
-            start_date?: string | null;
-            /** End Date */
-            end_date?: string | null;
-            /**
-             * Top N
-             * @default 30
-             */
-            top_n: number;
-            /**
-             * Rebalance Step
-             * @default 20
-             */
-            rebalance_step: number;
-            /**
-             * Initial Capital
-             * @default 1000000
-             */
-            initial_capital: number;
-            /**
-             * Commission Rate
-             * @default 0.0003
-             */
-            commission_rate: number;
-            /**
-             * Stamp Duty Rate
-             * @default 0.0005
-             */
-            stamp_duty_rate: number;
-            /**
-             * Slippage Rate
-             * @default 0.001
-             */
-            slippage_rate: number;
-        };
         /** FactorDefinitionCreate */
         FactorDefinitionCreate: {
             /** Factor Id */
@@ -1922,48 +1592,6 @@ export interface components {
              */
             owner: string;
         };
-        /** FactorEvaluationRequest */
-        FactorEvaluationRequest: {
-            /**
-             * Start Date
-             * @default 2021-01-01
-             */
-            start_date: string;
-            /** End Date */
-            end_date?: string | null;
-            /**
-             * Rebalance Step
-             * @default 20
-             */
-            rebalance_step: number;
-            /** Horizons */
-            horizons?: number[];
-            /**
-             * Layer Count
-             * @default 5
-             */
-            layer_count: number;
-        };
-        /** FactorLabSnapshotRequest */
-        FactorLabSnapshotRequest: {
-            /** As Of */
-            as_of?: string | null;
-        };
-        /** FactorLifecycleChange */
-        FactorLifecycleChange: {
-            /**
-             * To Status
-             * @enum {string}
-             */
-            to_status: "draft" | "testing" | "shadow" | "approved" | "deprecated";
-            /**
-             * Reviewer
-             * @default human
-             */
-            reviewer: string;
-            /** Note */
-            note: string;
-        };
         /** FactorNeutralizationRequest */
         FactorNeutralizationRequest: {
             /** Rows */
@@ -1982,37 +1610,6 @@ export interface components {
              * @default market_cap
              */
             market_cap_key: string;
-        };
-        /** FactorReleaseCreate */
-        FactorReleaseCreate: {
-            /** Factor Id */
-            factor_id: string;
-            /** Factor Version */
-            factor_version: number;
-            /** Evaluation Id */
-            evaluation_id: string;
-            /** Backtest Id */
-            backtest_id: string;
-            /**
-             * Limitations Acknowledged
-             * @default false
-             */
-            limitations_acknowledged: boolean;
-            /**
-             * Created By
-             * @default human
-             */
-            created_by: string;
-        };
-        /** FactorReleaseDecision */
-        FactorReleaseDecision: {
-            /**
-             * Reviewer
-             * @default human
-             */
-            reviewer: string;
-            /** Note */
-            note: string;
         };
         /** FactorSnapshotRequest */
         FactorSnapshotRequest: {
@@ -3166,6 +2763,28 @@ export interface operations {
             };
         };
     };
+    quant_research_factor_templates_api_quant_research_factor_templates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     quant_research_factors_api_quant_research_factors_get: {
         parameters: {
             query?: {
@@ -3200,19 +2819,21 @@ export interface operations {
             };
         };
     };
-    quant_research_models_api_quant_research_models_get: {
+    create_quant_factor_api_quant_research_factors_post: {
         parameters: {
-            query?: {
-                status?: string | null;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FactorDefinitionCreate"];
+            };
+        };
         responses: {
             /** @description Successful Response */
-            200: {
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3265,6 +2886,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    latest_quant_backtest_api_quant_research_backtests_latest_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };
@@ -3450,604 +3093,6 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    factor_lab_overview_api_factor_lab_overview_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    factor_lab_templates_api_factor_lab_templates_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    factor_lab_factors_api_factor_lab_factors_get: {
-        parameters: {
-            query?: {
-                status?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    create_factor_definition_api_factor_lab_factors_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FactorDefinitionCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    change_factor_lifecycle_api_factor_lab_factors__factor_id__versions__version__status_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                factor_id: string;
-                version: number;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FactorLifecycleChange"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    generate_factor_lab_snapshot_api_factor_lab_snapshots_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FactorLabSnapshotRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    latest_factor_lab_snapshot_api_factor_lab_snapshots_latest_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    factor_lab_snapshot_values_api_factor_lab_snapshots__snapshot_id__values_get: {
-        parameters: {
-            query: {
-                factor_id: string;
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                snapshot_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    run_factor_evaluation_api_factor_lab_evaluations_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FactorEvaluationRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    latest_factor_evaluation_api_factor_lab_evaluations_latest_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    factor_evaluation_api_factor_lab_evaluations__evaluation_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                evaluation_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    run_factor_backtest_api_factor_lab_backtests_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FactorBacktestRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    latest_factor_backtest_api_factor_lab_backtests_latest_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-        };
-    };
-    factor_backtest_api_factor_lab_backtests__backtest_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                backtest_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    create_factor_release_api_factor_lab_releases_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FactorReleaseCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    latest_factor_releases_api_factor_lab_releases_latest_get: {
-        parameters: {
-            query?: {
-                limit?: number;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    factor_release_api_factor_lab_releases__release_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                release_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    approve_factor_release_api_factor_lab_releases__release_id__approve_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                release_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FactorReleaseDecision"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    reject_factor_release_api_factor_lab_releases__release_id__reject_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                release_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FactorReleaseDecision"];
-            };
-        };
         responses: {
             /** @description Successful Response */
             200: {

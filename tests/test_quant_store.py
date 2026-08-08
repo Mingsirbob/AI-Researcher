@@ -1,10 +1,6 @@
 import sqlite3
 
 from app.market.repository import StockRepository
-from app.quant.factor_backtest import FactorBacktestService
-from app.quant.factor_evaluation import FactorEvaluationService
-from app.quant.factor_lab import FactorLabService
-from app.quant.factor_release import FactorReleaseService
 from app.core.migrations import applied_migrations
 from app.quant.store import QuantStore
 from app.research.store import ResearchStore
@@ -37,10 +33,6 @@ def test_quant_store_isolates_writes_and_syncs_security_projection(tmp_path):
     research_store.upsert_security_name("000001.SZ", "平安银行", source="test")
 
     quant_store = QuantStore(tmp_path / "quant_research.db", research_store)
-    quant_lab = FactorLabService(quant_store, repository)
-    quant_evaluation = FactorEvaluationService(quant_store, repository, quant_lab)
-    FactorBacktestService(quant_store, repository, quant_lab, quant_evaluation)
-    FactorReleaseService(quant_store)
     initial_snapshot = quant_store.start_factor_snapshot(
         as_of="2026-07-20",
         factor_version="quant-v1",
@@ -82,18 +74,7 @@ def test_quant_store_isolates_writes_and_syncs_security_projection(tmp_path):
 
     assert applied_migrations(quant_store.connect) == [
         "0001_quant_core",
-        "0008_factor_lab",
-        "0009_factor_evaluation",
-        "0010_factor_qfq_liquidity_contract",
-        "0011_factor_backtest",
-        "0012_factor_release",
         "0017_split_quant_core_database",
-        "0018_split_factor_lab_database",
-        "0019_split_factor_evaluation_database",
-        "0020_split_factor_backtest_database",
-        "0021_split_factor_release_database",
-        "0026_factor_catalog_cleanup",
-        "0027_simple_quant_research",
     ]
 
     QuantStore(tmp_path / "quant_research.db", research_store)

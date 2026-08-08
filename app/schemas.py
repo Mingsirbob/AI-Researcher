@@ -69,51 +69,6 @@ class FactorDefinitionCreate(BaseModel):
     owner: str = Field(default="human", min_length=1, max_length=80)
 
 
-class FactorLifecycleChange(BaseModel):
-    to_status: Literal["draft", "testing", "shadow", "approved", "deprecated"]
-    reviewer: str = Field(default="human", min_length=1, max_length=80)
-    note: str = Field(min_length=2, max_length=500)
-
-
-class FactorLabSnapshotRequest(BaseModel):
-    as_of: str | None = None
-
-
-class FactorEvaluationRequest(BaseModel):
-    start_date: str = "2021-01-01"
-    end_date: str | None = None
-    rebalance_step: int = Field(default=20, ge=1, le=120)
-    horizons: list[int] = Field(default_factory=lambda: [1, 5, 20], min_length=1, max_length=8)
-    layer_count: int = Field(default=5, ge=3, le=10)
-
-
-class FactorBacktestRequest(BaseModel):
-    evaluation_id: str | None = None
-    factor_id: str
-    start_date: str | None = None
-    end_date: str | None = None
-    top_n: int = Field(default=30, ge=5, le=100)
-    rebalance_step: int = Field(default=20, ge=5, le=120)
-    initial_capital: float = Field(default=1_000_000, gt=0, le=1_000_000_000)
-    commission_rate: float = Field(default=0.0003, ge=0, le=0.02)
-    stamp_duty_rate: float = Field(default=0.0005, ge=0, le=0.02)
-    slippage_rate: float = Field(default=0.001, ge=0, le=0.02)
-
-
-class FactorReleaseCreate(BaseModel):
-    factor_id: str = Field(min_length=2, max_length=80)
-    factor_version: int = Field(ge=1)
-    evaluation_id: str = Field(min_length=8, max_length=128)
-    backtest_id: str = Field(min_length=8, max_length=128)
-    limitations_acknowledged: bool = False
-    created_by: str = Field(default="human", min_length=1, max_length=80)
-
-
-class FactorReleaseDecision(BaseModel):
-    reviewer: str = Field(default="human", min_length=1, max_length=80)
-    note: str = Field(min_length=2, max_length=1000)
-
-
 class ResearchCandidateCreate(BaseModel):
     code: str
     snapshot_id: str

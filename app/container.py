@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
+from pathlib import Path
+import shutil
+from tempfile import TemporaryDirectory
+import time
 
 from app.research.announcements import AnnouncementPipeline
 from app.research.company import CompanyResearchService
@@ -13,14 +18,12 @@ from app.decision.cases import DecisionCaseService
 from app.decision.portfolio import PortfolioDecisionService
 from app.decision.outcomes import DecisionOutcomeService
 from app.research.acceptance import EvidenceAcceptanceService
-from app.quant.factor_backtest import FactorBacktestService
-from app.quant.factor_evaluation import FactorEvaluationService
-from app.quant.factor_lab import FactorLabService
-from app.quant.factor_release import FactorReleaseService
 from app.data.ifind import IFindDataLayer
 from app.paper.service import PaperTradingService
 from app.quant.factors import FactorSnapshotService
 from app.quant.store import QuantStore
+from app.quant.simple_research import SimpleResearchCatalog
+from app.quant.model_manifest import load_model_manifest
 from app.research.store import ResearchStore
 from app.core.runtime_events import RuntimeEventStore
 from app.core.sqlite_store import SQLiteStore
@@ -41,15 +44,11 @@ class AppContainer:
     paper_store: SQLiteStore
     stock_pool_store: StockPoolStore
     quant_store: QuantStore
+    simple_research_catalog: SimpleResearchCatalog
     strategy_service: StrategyService
     company_research_service: CompanyResearchService
     announcement_pipeline: AnnouncementPipeline
     factor_snapshot_service: FactorSnapshotService
-    factor_lab_repository: StockRepository
-    factor_lab_service: FactorLabService
-    factor_evaluation_service: FactorEvaluationService | None
-    factor_backtest_service: FactorBacktestService | None
-    factor_release_service: FactorReleaseService
     evidence_acceptance_service: EvidenceAcceptanceService
     decision_case_service: DecisionCaseService
     decision_outcome_service: DecisionOutcomeService
@@ -57,9 +56,23 @@ class AppContainer:
     current_shadow_service: CurrentShadowService
     daily_batch_store: DailyBatchStore
     daily_batch_runner: DailyBatchRunner
+    runtime_owner: TemporaryDirectory
+    runtime_root: Path
 
     def close(self) -> None:
         self.ifind_service.close()
+        for attempt in range(20):
+            gc.collect()
+            try:
+                shutil.rmtree(self.runtime_root)
+                break
+            except FileNotFoundError:
+                break
+            except PermissionError:
+                if attempt == 19:
+                    break
+                time.sleep(0.1 * (attempt + 1))
+        self.runtime_owner.cleanup()
 
 
 def create_app_container(app_settings: Settings = settings) -> AppContainer:
@@ -69,43 +82,26 @@ def create_app_container(app_settings: Settings = settings) -> AppContainer:
     research_store = ResearchStore(app_settings.state_db, app_settings.document_root)
     paper_store = SQLiteStore(app_settings.paper_db)
     stock_pool_store = StockPoolStore(app_settings.stock_pool_db)
-    quant_store = QuantStore(app_settings.quant_db, research_store)
-    factor_lab_repository = (
-        StockRepository(app_settings.stock_qfq_db)
-        if app_settings.stock_qfq_db.exists()
-        else repo
+    app_settings.runtime_temp_root.mkdir(parents=True, exist_ok=True)
+    stale_before = time.time() - 24 * 60 * 60
+    for stale in app_settings.runtime_temp_root.iterdir():
+        if stale.is_dir() and stale.stat().st_mtime < stale_before:
+            shutil.rmtree(stale, ignore_errors=True)
+    runtime_owner = TemporaryDirectory(
+        prefix="paper-runtime-", dir=app_settings.runtime_temp_root,
+        ignore_cleanup_errors=True,
     )
-    factor_lab_service = FactorLabService(
-        quant_store,
-        factor_lab_repository,
-        adjustment="CPS:2" if app_settings.stock_qfq_db.exists() else "unadjusted",
-        universe=(
-            "CSI300 current"
-            if app_settings.stock_qfq_db.exists()
-            else "A-share local coverage"
-        ),
-    )
-    factor_evaluation_service = (
-        FactorEvaluationService(quant_store, factor_lab_repository, factor_lab_service)
-        if app_settings.stock_qfq_db.exists()
-        else None
-    )
-    factor_backtest_service = (
-        FactorBacktestService(
-            quant_store,
-            factor_lab_repository,
-            factor_lab_service,
-            factor_evaluation_service,
-        )
-        if factor_evaluation_service
-        else None
-    )
+    runtime_root = Path(runtime_owner.name)
+    quant_store = QuantStore(runtime_root / "runtime.db", research_store)
+    load_model_manifest(quant_store, app_settings.model_artifact_root)
+    quant_catalog_store = SQLiteStore(app_settings.quant_db)
+    simple_research_catalog = SimpleResearchCatalog(quant_catalog_store)
     strategy_generator = StrategyGenerator(
         OpenAICompatibleProvider(app_settings),
         ROOT / "app" / "llm" / "prompts" / "strategy-generate.md",
     ) if app_settings.llm_configured else None
     strategy_service = StrategyService(
-        quant_store,
+        quant_catalog_store,
         strategy_run_root=app_settings.strategy_run_root,
         generator=strategy_generator,
         stock_pool_store=stock_pool_store,
@@ -142,17 +138,13 @@ def create_app_container(app_settings: Settings = settings) -> AppContainer:
         paper_store=paper_store,
         stock_pool_store=stock_pool_store,
         quant_store=quant_store,
+        simple_research_catalog=simple_research_catalog,
         strategy_service=strategy_service,
         company_research_service=CompanyResearchService(
             repo, research_store, app_settings, quant_store=quant_store
         ),
         announcement_pipeline=AnnouncementPipeline(research_store, ifind_service),
         factor_snapshot_service=FactorSnapshotService(repo, quant_store),
-        factor_lab_repository=factor_lab_repository,
-        factor_lab_service=factor_lab_service,
-        factor_evaluation_service=factor_evaluation_service,
-        factor_backtest_service=factor_backtest_service,
-        factor_release_service=FactorReleaseService(quant_store),
         evidence_acceptance_service=EvidenceAcceptanceService(
             research_store, ROOT / "data" / "acceptance" / "evidence_acceptance_v1.json"
         ),
@@ -162,10 +154,13 @@ def create_app_container(app_settings: Settings = settings) -> AppContainer:
         decision_outcome_service=DecisionOutcomeService(research_store),
         paper_trading_service=paper_trading_service,
         current_shadow_service=CurrentShadowService(
-            app_settings, quant_store, research_store, ifind_service, stock_pool_store
+            app_settings, quant_store, research_store, ifind_service, stock_pool_store,
+            provider_root=runtime_root / "providers",
         ),
         daily_batch_store=daily_batch_store,
         daily_batch_runner=DailyBatchRunner(daily_batch_store),
+        runtime_owner=runtime_owner,
+        runtime_root=runtime_root,
     )
 
 
