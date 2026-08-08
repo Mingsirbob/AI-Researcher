@@ -613,6 +613,34 @@ class QuantStore:
             ).fetchone()
         return self._decode_current_shadow(row) if row else None
 
+    def clear_daily_runtime(self, as_of: str) -> None:
+        """Delete batch-only factors and model scores after proposals are stored."""
+        with self.connect() as conn:
+            shadow_ids = [
+                row[0] for row in conn.execute(
+                    "SELECT snapshot_id FROM current_shadow_snapshot WHERE as_of=?", (as_of,)
+                )
+            ]
+            for snapshot_id in shadow_ids:
+                conn.execute(
+                    "DELETE FROM current_shadow_signal WHERE snapshot_id=?", (snapshot_id,)
+                )
+            conn.execute("DELETE FROM current_shadow_snapshot WHERE as_of=?", (as_of,))
+
+            factor_ids = [
+                row[0] for row in conn.execute(
+                    "SELECT snapshot_id FROM factor_snapshot WHERE as_of=?", (as_of,)
+                )
+            ]
+            for snapshot_id in factor_ids:
+                conn.execute(
+                    "DELETE FROM research_candidate WHERE source_snapshot_id=?", (snapshot_id,)
+                )
+                conn.execute(
+                    "DELETE FROM security_factor_snapshot WHERE snapshot_id=?", (snapshot_id,)
+                )
+            conn.execute("DELETE FROM factor_snapshot WHERE as_of=?", (as_of,))
+
     def current_shadow_for_date(self, as_of: str, model_run_id: str | None = None) -> dict | None:
         conditions = ["as_of=?"]
         params: list[object] = [as_of]

@@ -323,6 +323,46 @@ def current_signal_rows(predictions: pd.Series) -> list[dict]:
     ]
 
 
+def score_rows_via_csv(predictions: pd.Series, csv_path: Path) -> list[dict]:
+    """Write raw model scores first, then reload and rank the CSV."""
+    if predictions.empty or predictions.index.names != ["datetime", "instrument"]:
+        raise ValueError("当前预测必须使用 datetime + instrument 索引")
+    values = pd.to_numeric(predictions, errors="raise")
+    if values.isna().any() or not np.isfinite(values.to_numpy()).all():
+        raise ValueError("当前预测包含空值或非有限值")
+    raw = values.rename("score").reset_index()
+    if raw["datetime"].nunique() != 1 or raw["instrument"].duplicated().any():
+        raise ValueError("当前预测必须是单一交易日的唯一证券截面")
+    raw["source_instrument"] = raw["instrument"].astype(str).str.upper()
+    raw["security_code"] = raw["source_instrument"].map(qlib_instrument_to_code)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    raw[["datetime", "security_code", "source_instrument", "score"]].to_csv(
+        csv_path, index=False, encoding="utf-8-sig"
+    )
+
+    ranked = pd.read_csv(csv_path).sort_values(
+        ["score", "security_code"], ascending=[False, True], kind="stable"
+    ).reset_index(drop=True)
+    ranked["cross_section_rank"] = ranked.index + 1
+    size = len(ranked)
+    ranked["cross_section_size"] = size
+    ranked["percentile"] = (
+        100.0 * (size - ranked["cross_section_rank"]) / max(size - 1, 1)
+    )
+    ranked.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return [
+        {
+            "security_code": row.security_code,
+            "source_instrument": row.source_instrument,
+            "score": float(row.score),
+            "cross_section_rank": int(row.cross_section_rank),
+            "cross_section_size": int(row.cross_section_size),
+            "percentile": round(float(row.percentile), 4),
+        }
+        for row in ranked.itertuples(index=False)
+    ]
+
+
 class CurrentShadowPipeline:
     def __init__(self, store: QuantStore, provider_root: Path):
         self.store = store
@@ -381,6 +421,7 @@ class CurrentShadowPipeline:
         as_of: date,
         trust_pickle: bool,
         alignment: dict | None = None,
+        score_csv_path: Path | None = None,
     ) -> dict:
         if not trust_pickle:
             raise ValueError("必须显式确认信任 pickle 才能执行当前推理")
@@ -417,7 +458,11 @@ class CurrentShadowPipeline:
         with Path(model_artifact["file_path"]).open("rb") as handle:
             fitted_model = pickle.load(handle)
         predictions = fitted_model.predict(dataset, segment="current")
-        rows = current_signal_rows(predictions)
+        rows = (
+            score_rows_via_csv(predictions, score_csv_path)
+            if score_csv_path is not None
+            else current_signal_rows(predictions)
+        )
         prediction_coverage = len(rows) / len(universe) if len(universe) else 0.0
         gates = [
             *contract["gates"],
@@ -462,5 +507,6 @@ class CurrentShadowPipeline:
             "gates": gates,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "provider": {**provider, "vwap_alignment": alignment or {}},
+            "score_csv": str(score_csv_path) if score_csv_path else None,
         }
         return self.store.register_current_shadow(snapshot, rows if status == "current_shadow_ready" else [])

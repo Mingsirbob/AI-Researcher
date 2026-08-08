@@ -6,6 +6,7 @@ import sqlite3
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pandas as pd
 
@@ -22,8 +23,10 @@ from app.quant.current_shadow import (
 )
 from app.research.store import ResearchStore
 from app.quant.store import QuantStore
+from app.quant.model_manifest import load_model_manifest
 from app.core.primitives import code_to_table
-from app.data.ifind import INDEX_UNIVERSES, IFindDataLayer
+from app.data.ifind import IFindDataLayer
+from app.market.stock_pool import StockPoolStore
 
 
 def parse_args() -> argparse.Namespace:
@@ -84,18 +87,25 @@ def main() -> int:
     if args.lookback_days < 120 or args.batch_size < 1:
         raise ValueError("lookback-days 至少为 120，batch-size 必须大于 0")
     research_store = ResearchStore(settings.state_db, settings.document_root)
-    store = QuantStore(settings.quant_db, research_store)
+    settings.runtime_temp_root.mkdir(parents=True, exist_ok=True)
+    runtime = TemporaryDirectory(
+        prefix="shadow-cli-", dir=settings.runtime_temp_root,
+        ignore_cleanup_errors=True,
+    )
+    runtime_root = Path(runtime.name)
+    store = QuantStore(runtime_root / "runtime.db", research_store)
+    load_model_manifest(store, settings.model_artifact_root)
     latest = store.latest_model_run()
     run_id = args.run_id or (latest or {}).get("model_run_id")
     if not run_id:
         raise ValueError("尚无已注册模型运行")
-    pipeline = CurrentShadowPipeline(store, settings.current_shadow_root / "providers")
+    pipeline = CurrentShadowPipeline(store, runtime_root / "providers")
     model, validation = pipeline.validate_model(run_id, trust_pickle=args.trust_pickle)
     if args.validate_only:
         print(json.dumps({"model_run_id": run_id, "validation": validation}, ensure_ascii=False, indent=2))
         return 0 if validation["status"] == "passed" else 2
 
-    market_data_end = store.market_data_end()
+    market_data_end = research_store.market_data_end()
     if not args.as_of and not market_data_end:
         raise ValueError("证券主数据尚未记录本地行情截止日")
     as_of = args.as_of or date.fromisoformat(market_data_end)
@@ -103,7 +113,8 @@ def main() -> int:
     data = IFindDataLayer(settings)
     data.start()
     try:
-        universe = data.get_index_members(INDEX_UNIVERSES["csi300"], as_of)
+        pool_snapshot = StockPoolStore(settings.stock_pool_db).resolve("csi300", as_of)
+        universe = pd.DataFrame(pool_snapshot["members"])
         frames: list[pd.DataFrame] = []
         codes = universe["security_code"].tolist()
         for offset in range(0, len(codes), args.batch_size):
@@ -154,7 +165,7 @@ def main() -> int:
         return 0 if contract["status"] == "passed" else 2
     for item in universe.itertuples(index=False):
         research_store.upsert_security_name(
-            item.security_code, item.security_name, source="iFinD_THS_DR"
+            item.security_code, item.security_name, source=pool_snapshot["source"]
         )
     store.sync_security_projection()
     snapshot = pipeline.predict(
@@ -166,7 +177,9 @@ def main() -> int:
         as_of=as_of,
         trust_pickle=args.trust_pickle,
         alignment=alignment,
+        score_csv_path=runtime_root / "lightgbm_scores.csv",
     )
+    (runtime_root / "lightgbm_scores.csv").unlink(missing_ok=True)
     print(
         json.dumps(
             {

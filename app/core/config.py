@@ -50,6 +50,7 @@ class Settings:
     document_root: Path = ROOT / "data" / "documents"
     model_artifact_root: Path = ROOT / "data" / "model_artifacts"
     current_shadow_root: Path = ROOT / "data" / "current_shadow"
+    runtime_temp_root: Path = ROOT / "data" / "runtime_tmp"
     strategy_run_root: Path = ROOT / "data" / "strategy_runs"
     llm_base_url: str = os.getenv("TRADINGAGENTS_LLM_BACKEND_URL", "")
     llm_api_key: str = os.getenv("OPENAI_COMPATIBLE_API_KEY", "")

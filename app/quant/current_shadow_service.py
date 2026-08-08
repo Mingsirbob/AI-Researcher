@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 
@@ -23,6 +24,7 @@ class CurrentShadowService:
         master_store: ResearchStore | None = None,
         ifind: IFindDataLayer | None = None,
         stock_pool_store: StockPoolStore | None = None,
+        provider_root: Path | None = None,
     ):
         self.settings = settings
         self.store = store
@@ -33,7 +35,9 @@ class CurrentShadowService:
             raise ValueError("CurrentShadowService 必须使用本地股池数据库")
         self.ifind = ifind
         self.stock_pool_store = stock_pool_store
-        self.pipeline = CurrentShadowPipeline(store, settings.current_shadow_root / "providers")
+        self.pipeline = CurrentShadowPipeline(
+            store, provider_root or settings.current_shadow_root / "providers"
+        )
         self._lock = threading.Lock()
 
     def _load_unadjusted_history(
@@ -73,6 +77,7 @@ class CurrentShadowService:
         lookback_days: int = 240,
         batch_size: int = 20,
         trust_pickle: bool = True,
+        workspace: Path | None = None,
     ) -> dict:
         if lookback_days < 120 or batch_size < 1:
             raise ValueError("lookback_days 至少为 120，batch_size 必须大于 0")
@@ -119,7 +124,12 @@ class CurrentShadowService:
                 )
             if hasattr(self.store, "sync_security_projection"):
                 self.store.sync_security_projection()
-            snapshot = self.pipeline.predict(
+            pipeline = (
+                CurrentShadowPipeline(self.store, workspace / "providers")
+                if workspace is not None
+                else self.pipeline
+            )
+            snapshot = pipeline.predict(
                 model=model,
                 validation=validation,
                 frame=frame,
@@ -128,5 +138,6 @@ class CurrentShadowService:
                 as_of=as_of,
                 trust_pickle=trust_pickle,
                 alignment=alignment,
+                score_csv_path=(workspace / "lightgbm_scores.csv") if workspace else None,
             )
             return {**snapshot, "reused": False}

@@ -71,7 +71,7 @@ def test_draft_compile_and_immutable_publish_without_evidence_gate(tmp_path):
     assert runtime["config"]["top_n"] == 30
     with pytest.raises(ValueError, match="不可修改"):
         service.update_draft(draft["draft_id"], draft["definition"])
-    assert "0024_strategy_editor" in applied_migrations(quant.connect)
+    assert "0033_compact_quant_strategy" in applied_migrations(quant.connect)
 
 
 def test_account_deployment_binds_published_hash(tmp_path):

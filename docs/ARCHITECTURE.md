@@ -61,12 +61,12 @@ flowchart LR
 | `stock_data_hfq.db` | 复权构建脚本 | `CPS:1` 后复权日线 | 可选研究库，不进入默认主流程 |
 | `stock_pool.db` | 股票池同步服务 | 股池定义和日期化成员 | 策略绑定 `pool_id`，历史研究需检查快照时点 |
 | `research_state.db` | 研究、Thesis、决策、运行事件 | Evidence、文档、研究产物、案例、事件账本 | 不再承载模拟盘和量化领域的新写入 |
-| `quant_research.db` | QuantStore、StrategyService | 因子、评价、回测、模型、Shadow、策略草稿和版本 | 策略版本和源码的权威记录 |
+| `quant_research.db` | SimpleResearchCatalog、StrategyService | `quant_factor`、`quant_strategy`、`quant_backtest` | 因子、策略和回测的权威记录 |
 | `paper_trading.db` | PaperTradingService、DailyBatchStore | 账户、部署、批次、订单、成交、持仓、NAV、实时报价 | 模拟盘执行状态的权威记录 |
 
 Schema 由各 Store 初始化时调用 `app/core/migrations.py::apply_migration()` 幂等更新，并将迁移 ID 写入各自数据库的 `schema_migration`。跨库拆分迁移采用“复制后切换所有权”的方式；回滚必须依赖操作前备份，不能假设旧库仍持续双写。
 
-`data/strategy_runs/` 是已发布策略的文件级审计副本，不是策略权威数据库。应用启动时可从 `quant_research.db` 补齐缺失副本。
+`data/strategy_runs/` 保存策略代码文件，`quant_strategy` 保存策略名称、股票池、需求、代码路径和哈希。策略不再经过独立草稿、校验和发布审查表。
 
 ## 4. 核心数据流
 
@@ -84,7 +84,7 @@ iFinD / 本地日线
 
 ### 4.2 因子与回测
 
-`app/quant/factor_lab.py` 和相关服务管理因子版本与快照；`factor_evaluation.py` 计算 IC、分层和相关性；`factor_backtest.py` 调用共享 `app/backtest/` 内核运行成本后组合回测并保存结果。
+量化研究只暴露因子、回测和策略三个入口。因子当前状态写入 `quant_factor`，因子或策略回测统一写入 `quant_backtest`；详细指标和净值序列使用 JSON 字段，不再拆分版本、评价、发布和审查表。每日模拟组合不写量化运行数据库：LightGBM 原始评分写入批次临时 CSV，随后从 CSV 排序，批次结束后自动清理。
 
 `app/backtest/` 还被离线多因子脚本和模拟盘风险规则复用，但当前没有“任意已发布代码策略一键回测”的统一业务服务。前端 `/backtest` 的现有数据合同不能被解释为所有策略类型都已接入。
 
@@ -162,8 +162,9 @@ Vue 3 是唯一生产前端，主要路由为：
 | `/` | 模拟盘账户、批次、提案、成交、持仓和绩效 |
 | `/company`、`/theses` | 公司研究和长期论点 |
 | `/quant`、`/factor-development`、`/factor-evaluation` | 数据、因子开发与评价 |
-| `/backtest`、`/factor-library` | 因子回测、Shadow 和因子发布 |
-| `/strategies` | 大模型策略创建和已发布策略仓库 |
+| `/factor-development` | 因子创建与当前因子列表 |
+| `/backtest` | 因子与策略回测 |
+| `/strategies` | 大模型策略创建和策略仓库 |
 | `/decisions`、`/acceptance` | 决策案例、结果和证据质量验收 |
 
 前端共享 API 客户端位于 `frontend/src/api/`。`openapi.generated.ts` 是生成文件；后端接口变化后应重新生成并通过类型检查。

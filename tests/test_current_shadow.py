@@ -6,6 +6,7 @@ from app.quant.current_shadow import (
     align_forward_adjusted_fields,
     code_to_qlib_instrument,
     current_signal_rows,
+    score_rows_via_csv,
     rolling_oos_evaluation,
     write_qlib_provider,
 )
@@ -48,6 +49,25 @@ def test_current_signal_rows_rank_single_cross_section():
         ("600000.SH", 2),
         ("000001.SZ", 1),
     ]
+
+
+def test_score_rows_via_csv_materializes_then_ranks(tmp_path):
+    index = pd.MultiIndex.from_tuples(
+        [
+            ("2026-07-20", "SH600000"),
+            ("2026-07-20", "SZ000001"),
+        ],
+        names=("datetime", "instrument"),
+    )
+    target = tmp_path / "lightgbm_scores.csv"
+
+    rows = score_rows_via_csv(pd.Series([0.1, 0.3], index=index), target)
+    saved = pd.read_csv(target)
+
+    assert target.is_file()
+    assert saved["security_code"].tolist() == ["000001.SZ", "600000.SH"]
+    assert saved["cross_section_rank"].tolist() == [1, 2]
+    assert [item["security_code"] for item in rows] == ["000001.SZ", "600000.SH"]
 
 
 def test_write_qlib_provider_creates_calendar_instruments_and_binary_features(tmp_path, monkeypatch):

@@ -21,6 +21,7 @@ data/*.db-shm
 data/.stock_update.lock
 data/documents/
 data/current_shadow/
+data/runtime_tmp/
 data/model_artifacts/
 data/backups/
 data/backtests
