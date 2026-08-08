@@ -1,209 +1,332 @@
-# 迹研 · Evidence AI Research
+# A 股量化研究与模拟交易系统
 
-一个面向 A 股的本地证据型研究工作台。当前版本已覆盖本地行情、公告与财报证据、结构化研究、Thesis 手工监控、全市场候选池、当前 Shadow Signal、不可变 DecisionCase，以及完整周期的 DecisionOutcome 与跨案例归因。
+这是一个面向单用户本地环境的 A 股研究与模拟交易工作台。后端使用 FastAPI，前端使用 Vue 3，数据主要保存在本地 SQLite 数据库中。
 
-## 当前边界
+当前项目聚焦四条可运行链路：
 
-- 支持 4,897 只股票的本地日线查询与历史截止日 `as_of`。
-- 计算收益、均线、RSI、波动率、最大回撤、量比和 52 周位置。
-- 每条结论绑定 Evidence ID、数据日期、来源与计算方法。
-- AI 仅接收已计算证据，并经过 JSON Schema 与证据引用校验。
-- AI 服务不可用时自动降级为确定性报告。
-- 公告、财务、研究、决策、Thesis 与运行审计保存在 `data/research_state.db`；当前因子、策略和回测保存在 `data/quant_research.db`；模拟账户、订单、持仓、净值和每日模拟批次保存在 `data/paper_trading.db`。LightGBM 模型使用文件 manifest，单次批次评分使用临时 CSV，不保留历史评分。原行情库始终只读。
+- 本地行情、股票池、公告和财务证据管理；
+- 因子维护与历史回测结果查看；
+- 使用 OpenAI-compatible 大模型生成 Python 策略；
+- LightGBM 或代码策略驱动的模拟组合研究、人工审批与模拟成交。
 
-首次使用拆分版本启动时，迁移 `0014_split_paper_trading_database` 和
-`0015_split_paper_daily_batch_database` 会把旧状态库中的模拟盘数据幂等复制到
-`paper_trading.db`。迁移完成后的新增模拟盘写入仅进入新库。
-量化拆分迁移 `0017` 至 `0021` 采用相同策略，将旧量化数据复制到
-`quant_research.db`，并在启动时从研究库批量同步只读证券主数据投影。
-正式模式随后由 `0022_retire_split_domain_tables` 删除研究库中的旧模拟盘和量化表；
-回滚依赖迁移前数据库备份，不再保留运行时旧库回退。
-- 可选使用本机 iFinD SDK 补充证券简称和近期公告证据。
+项目只执行模拟交易，不连接真实券商，也不构成投资建议。
 
-当前仍不包含完整行业、同行和估值数据。当前 Shadow Signal 可以作为 DecisionCase 吸引力的一个显式分项，但不能覆盖证据、风险或准入门禁。人工批准只允许进入后续 Shadow 评价，系统不会输出买卖建议或目标价。
+## 当前功能
 
-模拟盘现已提供“运行完整批次”，按同一研究日依次完成：不复权日线补齐、证券主数据日期同步、全市场因子快照、Current Shadow、候选与现有持仓的证据研究、持仓复核和订单提案。六步状态与产物 ID 持久化，失败后可从断点继续；同日同配置重复执行会复用不可变产物。批次不会自动批准或成交订单。
+### 模拟盘
 
-`paper-evidence-risk-v3.2` 将全部持仓与 Shadow 候选统一评价：维持和冻结仓位继续占用组合席位，降权只允许减仓，只有否决或量化硬风险失败才提出退出。订单成交严格先卖后买；若卖单未释放席位，新建仓买单会被阻止，确保“最多持有 N 只”约束落实到实际持仓。
+- 创建模拟账户并选择内置策略或已生成的代码策略；
+- 运行每日完整研究批次；
+- 查看当前提案、历史提案、历史成交、持仓和组合净值；
+- 每条交易提案必须由用户单独批准或拒绝；
+- 仅在交易时段使用 iFinD 实时行情执行模拟撮合；
+- 支持 T+1、整手、可用现金、可卖数量、涨跌停和费用约束。
 
-量化实验室已推进到 M11.2。9 个口径有效的价量因子已从不复权 v1 升级为 `CPS:2 / CSI300 current` 的不可变 v2，并建立未来 1/5/20 日 Rank IC、年化 ICIR、五分层收益、Top 层换手和跨因子相关性评价。首个正式基线覆盖 2021-01-04 至 2026-06-18 的 67 个调仓截面，结果按数据、因子与参数指纹冻结。前复权 VWAP 不能与真实成交量直接相乘还原历史成交额，因此平均成交额因子仅保留不复权 v1 历史定义，不进入前复权评价。现有 LightGBM 仍绑定 `alpha158_set@v1`；评价结果不会自动进入模型、候选池或交易。当前股票池是查询时点的沪深300，历史评价存在幸存者偏差。
+### 策略编辑器
 
-M11.3 已建立单因子 Top-N 策略回测。回测绑定 M11.2 的评价 ID、因子版本和行情指纹，信号在收盘后形成并于下一交易日开盘成交，逐日记录现金、持仓、净值、回撤、调仓和交易成本。首个 `volume_ratio_20d@v2` 基线采用 Top 30、20日调仓；结果只用于研究，基准是当前沪深300等权代理，仍存在幸存者偏差且尚未完整模拟历史涨跌停、整手和冲击成本。
+用户只需要填写策略名称、股票池和策略需求。系统调用已配置的大模型生成 `generate_signals(context)`，完成基础代码检查后保存到策略仓库。
 
-## 运行
+策略元数据保存在 `quant_research.db`，代码文件保存在：
+
+```text
+data/strategy_runs/{strategy_id}/v1/strategy.py
+```
+
+代码策略在独立 Python 子进程中运行，包含 AST 限制、超时和输出校验，但这不是容器或虚拟机级安全沙箱，只适合本地受信任用户。
+
+### 量化研究
+
+量化研究数据库只保留当前因子、策略、回测和迁移记录，不再维护旧因子版本、发布审批和多层审查历史。
+
+前端当前支持：
+
+- `/factor-development`：创建和查看当前因子；
+- `/strategies`：生成策略并查看策略仓库；
+- `/backtest`：查看最近一次因子或策略回测结果。
+
+当前 `/backtest` 是结果查看界面，不是所有代码策略都已接入的一键回测入口。
+
+### 公司研究
+
+项目仍保留公告、PDF 文档、财务事实、公司研究、长期论点、决策案例和证据验收功能。研究文本可以使用大模型，但行情计算、证据日期和交易状态由后端确定性代码控制。
+
+## 系统结构
+
+```text
+app/
+|- api/          FastAPI 路由
+|- core/         配置、SQLite、迁移、运行事件和韧性机制
+|- data/         iFinD 数据接口
+|- market/       行情、复权数据和股票池
+|- research/     公告、财务事实、证据和公司研究
+|- quant/        因子、LightGBM 推理和临时运行数据
+|- backtest/     共享日频回测内核
+|- llm/          OpenAI-compatible 模型适配和策略生成
+|- strategy/     策略存储、代码检查和运行适配
+|- paper/        模拟账户、提案、审批、成交、持仓和净值
+|- decision/     决策案例和结果评价
+|- thesis/       长期论点
+`- workflows/    每日完整批次编排
+
+frontend/src/
+|- api/          前端 API 客户端和类型
+|- components/   公共组件
+|- features/     模拟盘、研究、量化、策略和审计页面
+|- router/       页面路由
+`- stores/       Pinia 状态
+```
+
+`app/container.py` 是后端依赖的统一装配入口，`app/main.py` 创建 FastAPI 应用。`example/` 仅保存外部架构参考，不参与正式运行。
+
+更详细的模块边界见 [docs/APP_STRUCTURE.md](docs/APP_STRUCTURE.md) 和 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## 数据与数据库
+
+运行数据库和模型文件位于 `data/`，默认不提交到 Git。
+
+| 文件或目录 | 用途 | 是否自动创建 |
+|---|---|---|
+| `stock_data.db` | 不复权日线和行情更新状态 | 否，需准备或更新 |
+| `stock_data_qfq.db` | 前复权研究行情，供 Alpha158、LightGBM 和回测使用 | 否，需准备或构建 |
+| `stock_data_hfq.db` | 后复权研究行情 | 可选 |
+| `stock_pool.db` | 股票池和日期化成分 | 空库可创建，但正式运行应同步数据 |
+| `research_state.db` | 公告、证据、研究、论点、决策和运行事件 | 是 |
+| `quant_research.db` | 当前因子、策略和回测 | 是 |
+| `paper_trading.db` | 模拟账户、批次、提案、成交、持仓和净值 | 是 |
+| `model_artifacts/` | LightGBM 模型、manifest 和相关产物 | 否，默认链路必须提供 |
+| `strategy_runs/` | 已启用策略的代码副本 | 可由策略记录重新生成 |
+| `runtime_tmp/` | 当前进程和批次的临时数据库、评分 CSV | 是，自动清理 |
+
+`quant_research.db` 当前固定为四张表：
+
+```text
+quant_factor
+quant_strategy
+quant_backtest
+schema_migration
+```
+
+`quant_runtime.db` 已退役。应用启动后会在 `data/runtime_tmp/` 创建进程级临时运行目录；LightGBM 对股池证券的评分先写入批次内的 `lightgbm_scores.csv`，排序和研究完成后删除，不长期保存每日全量评分。
+
+数据库 Schema 在 Store 初始化时通过幂等迁移创建或更新。不要手工修改表结构，测试也不应直接使用 `data/*.db`。
+
+## 每日模拟组合链路
+
+网页首页的“运行完整批次”依次执行：
+
+```text
+行情检查与更新
+  -> 因子快照
+  -> LightGBM 或代码策略评分
+  -> 候选研究
+  -> 持仓复核
+  -> 交易提案
+```
+
+对应的六个批次步骤为：
+
+1. `market_data`
+2. `factor_snapshot`
+3. `current_shadow`
+4. `candidate_research`
+5. `holdings_review`
+6. `order_proposals`
+
+批次按账户、研究日、批次版本和配置哈希复用。运行失败后可重新执行，已完成步骤会保留，失败步骤及其后续步骤会重试。完整批次只生成 `proposed` 提案，不会自动批准或成交。
+
+### 人工审批与成交
+
+标准流程是：
+
+1. 收盘后运行完整批次并生成当日研究提案；
+2. 用户逐条批准或拒绝；
+3. 下一交易日开市后点击“执行模拟撮合”；
+4. 在历史成交、持仓和净值区域核对结果。
+
+实时模拟撮合只允许上海时区交易日的两个时段：
+
+```text
+09:30-11:30
+13:00-15:00
+```
+
+撮合只读取账户最新有效研究批次中状态为 `approved` 的订单。新研究日批次会替代旧批次中尚未成交的提案，因此不会把多天未执行的批准订单一起累积到后续交易日。
+
+成交还要求行情交易日晚于提案研究日，且报价时间晚于人工批准时间。卖单先于买单执行，成交后现金、订单状态、持仓和净值统一写入 `paper_trading.db`。
+
+## 环境要求
+
+- Windows 或能够运行项目依赖的 Python 主机；
+- Conda；
+- Python 3.11；
+- Node.js 22；
+- iFinD Python SDK 和有效账号；
+- OpenAI-compatible 模型接口；
+- 当前 LightGBM 模型产物。
+
+项目约定使用 `quant` Conda 环境：
+
+```powershell
+conda env create -f environment.yml
+conda activate quant
+python scripts/check_environment.py
+```
+
+如果环境已经存在：
 
 ```powershell
 conda activate quant
+pip install -r requirements.lock
 python scripts/check_environment.py
+```
+
+## 配置
+
+在仓库根目录创建 `.env`，可从 `.env.example` 开始配置：
+
+```dotenv
+IFIND_USER=你的账号
+IFIND_PASSWORD=你的密码
+
+TRADINGAGENTS_LLM_PROVIDER=openai_compatible
+TRADINGAGENTS_LLM_BACKEND_URL=https://你的模型接口/v1
+OPENAI_COMPATIBLE_API_KEY=你的APIKey
+TRADINGAGENTS_QUICK_THINK_LLM=你的模型名称
+TRADINGAGENTS_DEEP_THINK_LLM=你的模型名称
+```
+
+当前策略生成使用 `TRADINGAGENTS_QUICK_THINK_LLM`。模型供应商只要提供兼容 `/chat/completions` 的 JSON 响应接口即可。
+
+`.env` 包含凭据，不能提交到 GitHub，也不要输出到日志。
+
+## 首次启动
+
+安装并构建前端：
+
+```powershell
+cd frontend
+npm ci
+npm run build
+cd ..
+```
+
+启动应用：
+
+```powershell
+conda activate quant
 python run.py
 ```
 
-默认打开 `http://127.0.0.1:8000`；也可通过环境变量或启动参数使用其他端口。
+访问：
 
-Vue 3 是唯一生产前端。运行 `npm ci && npm run build` 后，访问
-`http://127.0.0.1:8000` 会直接打开模拟盘；其他页面使用 `/company`、`/backtest`
-等根级路由。若构建产物缺失，根入口返回503；生产回滚通过恢复上一完整 Git/部署版本完成。迁移范围、开发方式和退役记录见
-`docs/VUE3_MIGRATION.md`。
-
-### iFinD 配置
-
-项目通过 `quant` 环境中安装的官方 `iFinDAPI` 包直接导入 `iFinDPy`。`.env` 至少需要：
-
-```dotenv
-IFIND_USER=你的数据接口账号ID
-IFIND_PASSWORD=你的数据接口密码
+```text
+http://127.0.0.1:8000
 ```
 
-账号和密码只用于进程内调用 `THS_iFinDLogin`，不会写入日志、数据库或 API 响应。`iFinD_Refresh_Token` 属于 HTTP API 的 access-token 流程，不能直接作为 `THS_iFinDLogin` 的账号参数；当前应用实现的是与 `example/crawl_ashares.py` 一致的 Python SDK 登录流程。
+如果 `frontend/dist/` 不存在，后端不会提供完整生产页面，需要先运行前端构建。
 
-### 日线增量更新
+## 部署到其他主机
 
-原始证据库 `data/stock_data.db` 固定使用 iFinD `THS_HD` 空参数（`""`）的不复权口径，任何复权序列都禁止写入该库。先查看增量计划：
+Git 仓库负责传输源代码、迁移、前端源码、测试和配置样例。以下内容不要提交到 GitHub，应通过受控方式手工复制：
+
+- `.env`
+- `data/stock_data.db`
+- `data/stock_data_qfq.db`
+- `data/stock_pool.db`
+- `data/model_artifacts/`
+
+需要保留现有业务状态时，再复制：
+
+- `data/research_state.db`
+- `data/quant_research.db`
+- `data/paper_trading.db`
+- `data/documents/`
+- `data/strategy_runs/`
+
+`paper_trading.db` 可以由应用自动创建；不复制它会得到一个新的模拟盘，并在首次访问时创建默认的“每日模拟组合”账户。若要保留已有账户、提案、成交、持仓和净值，则必须复制原数据库。
+
+推荐迁移顺序：
+
+1. 在目标主机拉取仓库；
+2. 创建 Conda 环境并安装前端依赖；
+3. 手工放置 `.env`、行情库、股票池和模型产物；
+4. 按需复制三个状态数据库和文档；
+5. 执行 `python scripts/check_environment.py`；
+6. 执行 `npm run build`；
+7. 执行 `python run.py`。
+
+完整运维说明见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
+
+## 数据更新
+
+不复权日线先检查再更新：
 
 ```powershell
 python scripts/update_stock_data.py --dry-run
-```
-
-执行增量更新：
-
-```powershell
 python scripts/update_stock_data.py
 ```
 
-命令会按 `Asia/Shanghai` 识别当前日期：18:00 前只检查前一自然日，18:00 后检查当天；登录后再通过 iFinD 官方 `THS_Date_Query` 取得该范围内最后一个真实交易日。系统会输出本地最早/最晚日期、待更新证券数和缺失交易日列表，仅在存在缺口时调用 `THS_HD`。因此周末和节假日不会被误判为缺失交易日，重复执行也不会重复写入。当前仍为人工触发，不配置后台定时任务。
-
-写库前会校验 iFinD 响应结构、日期、证券代码、OHLC/VWAP/成交量和跨日异常跳变。结构契约变化会回滚整次更新；单股质量异常写入 `data_quality_issues` 并隔离，不会静默进入行情表。iFinD 调用指标可通过 `/api/ifind/status` 查看。
-
-iFinD 和 LLM 均配置应用超时、有限重试、指数退避和熔断。默认连续 3 次可恢复故障后熔断 60 秒；认证、权限和数据契约错误快速失败，不进行无意义重试。
-
-### 复权研究数据库
-
-复权研究库构建工具已保留，但不是当前 M6 历史实验纳管的前提，也不会修改原始证据库：
-
-| 数据库 | iFinD 参数 | 口径 |
-|---|---|---|
-| `data/stock_data_qfq.db` | `CPS:2` | 前复权（forward） |
-| `data/stock_data_hfq.db` | `CPS:1` | 后复权（backward） |
-
-先检查全量构建计划：
+同步股票池：
 
 ```powershell
-python scripts/build_adjusted_stock_data.py --adjustment forward --dry-run
-python scripts/build_adjusted_stock_data.py --adjustment backward --dry-run
+python scripts/sync_stock_pools.py --as-of YYYY-MM-DD
 ```
 
-执行前复权库构建：
+构建前复权研究库：
 
 ```powershell
-python scripts/build_adjusted_stock_data.py --adjustment forward
+python scripts/build_adjusted_stock_data.py --adjustment forward --universe csi300 --dry-run
+python scripts/build_adjusted_stock_data.py --adjustment forward --universe csi300
 ```
 
-### 导入既有 Qlib/MLflow 实验
-
-当前 M6 复用用户已经训练的 LightGBM 运行，不会重新训练。仅对来源可信、由自己生成的 pickle 产物执行导入：
-
-```powershell
-python scripts/import_qlib_run.py `
-  --experiment-dir "F:\项目\qlib-main\mlruns\937502219828981168" `
-  --run-id a11a5663c34a477aafe9fc0c466193a4 `
-  --trust-pickle
-```
-
-导入会保存模型配置、指标、限制、产物 SHA-256、预测快照和逐证券历史信号。重复导入相同运行是幂等的；同一运行 ID 的产物指纹发生变化时会拒绝覆盖。历史预测截止 `2020-07-31`，用于滚动 OOS 复核和历史回放，不代表当前推荐。
-
-### 构建当前 Shadow Signal
-
-当前推理复用已经注册的冻结 LightGBM 模型，不重新训练。命令会先完成 2017-2020 OOS 预测的 63 交易日滚动窗口复核，再获取当前沪深300成分股，以 `CPS:2` 前复权行情构建 Alpha158 输入。只有模型哈希、证券覆盖、日期范围、字段、有限值和价格关系等门禁全部通过，才会发布信号：
-
-```powershell
-python scripts/build_current_shadow.py `
-  --run-id a11a5663c34a477aafe9fc0c466193a4 `
-  --as-of 2026-07-20 `
-  --lookback-days 240 `
-  --trust-pickle
-```
-
-可用 `--validate-only` 只执行历史 OOS 复核，或用 `--diagnose-data` 输出当前输入诊断。滚动 OOS 是对冻结模型已有样本外预测的连续窗口评价，不是滚动重训。被门禁拒绝的快照会保留用于审计，但不会发布信号。
-
-### M7 受控决策案例
-
-在网页“决策案例”中选择证券、截止日、20/60/120/250 交易日周期和沪深300/中证500/中证1000基准。系统自动绑定同日最新 ResearchRun、Evidence/Company/Quant Artifact 哈希、Thesis 和当前 Shadow，并通过 `decision-policy-v1.1` 生成：
-
-- `attractiveness`、`evidence_confidence`、`risk_severity` 三个独立评分；
-- `excluded`、`insufficient_evidence`、`research_required`、`watch` 或 `eligible_for_review` 规则状态；
-- 流动性、波动率、回撤、证据时点、Thesis 基线和模型验证等可审计门禁；
-- `approve_for_tracking`、`return_for_research` 或 `reject` 追加式人工审批。
-
-只有 `eligible_for_review` 能批准进入 M8 Shadow 跟踪。审批不会产生交易授权，同一案例审批后不能覆盖；研究或策略变化必须创建新案例。
-
-### M8 结果评价
-
-在“决策案例”详情中手工点击“评价结果”。系统使用 iFinD `THS_HD` 的 `CPS:2` 前复权证券与基准收盘价。未满完整交易日周期时只保存和显示 `pending` 进度；成熟后计算证券收益、基准收益、超额收益与最大不利波动。页面下方的跨案例归因只纳入每个案例最新的完整结果，低于 5 个样本的分组明确标记为低样本。
-
-```text
-POST /api/decision-cases/{case_id}/outcome
-GET  /api/decision-cases/{case_id}/outcome
-GET  /api/decision-outcomes/attribution
-```
-
-结果评价仍是 Shadow 研究审计，不构成交易建议或交易授权。
-
-#### 如何积累真实成熟案例
-
-真实成熟案例必须在结果发生前冻结 `DecisionCase`，等待完整决策周期结束，通过 `CPS:2` 前复权价格、基准日期和价格对齐合同，并最终得到 `DecisionOutcome.status=completed`；不能使用已经知道结果的历史区间倒填案例。当前建议每周固定一个截止日，先更新行情并重建同日 Current Shadow，再按预先规定的 Shadow 分位选择 6–10 只证券，完成同日 ResearchRun、Thesis 基线、DecisionCase 和人工审批。前段、中间段、低分、规则未通过或人工拒绝样本都应保留，不能只记录最终表现好的证券。
-
-第一批以 `20d` 为主获得约四周反馈，同时为少量证券建立 `60d` 案例。每周手工运行结果评价；系统会让未到期案例保持 `pending`，完整周期后才转为 `completed`。同一证券的重叠案例并非独立样本，归因时还需按建案日期批次观察。
-
-样本数解释边界：5 个仅验证工程链路；30 个完整案例才开始观察分布。进入 M9 准入评审的最低样本条件是至少 100 个完整案例、关键分组各至少 30 个，并覆盖至少 6 个不同建案批次；它不是自动放行条件。还必须确认跨时期表现稳定、数据拒绝率可控、研究过程可复现，并通过批次级汇总、相关性、Bootstrap 置信区间和集中度检查。上述门槛是项目治理要求，不是统计显著性的保证。
-
-复权库采用与原库相同的 `stock_<code>` 分表结构，但只通过全量临时库构建并原子替换。前复权历史会随公司行为改变，禁止按日期简单 append。
-
-### 阶段 A 公告证据
-
-初始化证券主数据并同步公告 PDF：
+同步公告和研究数据：
 
 ```powershell
 python scripts/sync_research_data.py --bootstrap
-python scripts/sync_research_data.py --code 300750.SZ --end-date 2026-07-20 --download-limit 5
+python scripts/sync_research_data.py --code 601888.SH --end-date YYYY-MM-DD --download-limit 5
 ```
 
-公告原件按 SHA-256 保存，文本按页提取和切块；只有通过文本层质量检测的块才会进入 AI 证据，引用绑定本地 PDF、页码和 hash。详细数据模型和限制见 `docs/STAGE_A.md`。
-
-更新器只追加每张股票表最大日期之后的数据，不覆盖历史主键，并将运行结果写入 `data_update_runs`。当前采用人工日更，完整操作、质量隔离和故障处理见 `docs/OPERATIONS.md`。
+数据更新脚本涉及写库时应先使用 `--dry-run`。前复权历史可能随公司行为变化，不应把它当作永远不变的增量序列。
 
 ## 测试
+
+后端：
 
 ```powershell
 conda activate quant
 pytest -q
 ```
 
-## API
+前端：
 
-- `GET /api/stocks/{code}/analysis?as_of=YYYY-MM-DD`
-- `GET /api/stocks/{code}/context?as_of=YYYY-MM-DD`
-- `GET /api/ifind/status`
-- `POST /api/research`
-- `POST /api/research-runs`
-- `GET /api/stocks/{code}/research-runs`
-- `GET /api/research-runs/{id}`
-- `POST /api/document-assistant`
-- `POST /api/financial-change-template`
-- `GET /api/securities?q=300750`
-- `GET|POST /api/theses`
-- `PATCH|DELETE /api/theses/{id}`
-- `GET /api/model-runs/latest`
-- `GET /api/model-runs/{model_run_id}`
-- `GET /api/model-runs/{model_run_id}/signals`
-- `GET /api/model-runs/{model_run_id}/validation`
-- `GET /api/current-shadow/latest`
-- `GET /api/current-shadow/{snapshot_id}/signals`
-- `GET|POST /api/quant-research/factors`
-- `GET /api/quant-research/factor-templates`
-- `GET /api/quant-research/backtests/latest`
-- `POST /api/paper/daily-batches`
-- `GET /api/paper/daily-batches/latest`
-- `GET /api/paper/daily-batches/{batch_id}`
-- `POST|GET /api/decision-cases`
-- `GET /api/decision-cases/{case_id}`
-- `POST /api/decision-cases/{case_id}/reviews`
+```powershell
+cd frontend
+npm run typecheck
+npm run test
+npm run build
+```
+
+端到端测试需要先启动后端服务：
+
+```powershell
+cd frontend
+npm run test:e2e
+```
+
+GitHub Actions 会执行后端测试、前端测试、生产构建和 Playwright 端到端测试。
+
+## 当前限制
+
+- 项目面向单用户本地部署，没有登录、租户隔离或正式任务队列；
+- SQLite 不适合多主机同时写入同一状态库；
+- iFinD 是主要行情和实时报价来源；
+- LightGBM 模型文件是默认每日研究链路的必要外部产物；
+- 代码策略执行只提供基础限制，不应运行不可信第三方代码；
+- 回测结果不能代表未来收益，模拟成交也不等同于真实市场成交。
+
+## 文档
+
+- [系统架构](docs/ARCHITECTURE.md)
+- [项目结构](docs/APP_STRUCTURE.md)
+- [运行与维护](docs/OPERATIONS.md)
+- [iFinD 接口参考](docs/IFIND_API_REFERENCE.md)
