@@ -1,37 +1,19 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 import { useQuery } from "@tanstack/vue-query";
-import { Activity, BookOpenCheck, Building2, ChevronRight, ClipboardCheck, FileSearch, FlaskConical, GitBranch, Menu, Search, ShieldCheck, X } from "lucide-vue-next";
+import { Activity, GitBranch, Menu, X } from "lucide-vue-next";
 import { api } from "@/api/client";
 import { useUiStore } from "@/stores/ui";
 
 const route = useRoute();
-const router = useRouter();
 const ui = useUiStore();
-const query = ref("");
-const searchOpen = ref(false);
 
 const groups = [
   { label: "交易", items: [{ to: "/", label: "模拟盘", icon: Activity }] },
-  { label: "公司", items: [{ to: "/company", label: "公司分析", icon: Building2 }, { to: "/theses", label: "长期论点", icon: FileSearch }] },
-  { label: "量化研究", items: [{ to: "/factor-development", label: "因子", icon: FlaskConical }, { to: "/backtest", label: "回测", icon: BookOpenCheck }, { to: "/strategies", label: "策略", icon: GitBranch }] },
-  { label: "审计", items: [{ to: "/decisions", label: "案例评价", icon: ShieldCheck }, { to: "/acceptance", label: "质量验收", icon: ClipboardCheck }] },
+  { label: "策略", items: [{ to: "/strategies", label: "策略", icon: GitBranch }] },
 ];
 
 const health = useQuery({ queryKey: ["health"], queryFn: () => api<any>("/api/health"), refetchInterval: 60_000 });
-const securities = useQuery({
-  queryKey: computed(() => ["securities", query.value]),
-  queryFn: () => api<any>(`/api/securities?q=${encodeURIComponent(query.value)}&limit=8`),
-  enabled: computed(() => query.value.trim().length > 0),
-});
-
-function openSecurity(code: string) {
-  query.value = code;
-  searchOpen.value = false;
-  ui.navOpen = false;
-  router.push({ path: "/company", query: { code } });
-}
 </script>
 
 <template>
@@ -39,15 +21,6 @@ function openSecurity(code: string) {
     <header class="topbar">
       <button class="icon-button mobile-menu" title="打开导航" @click="ui.navOpen = true"><Menu :size="19" /></button>
       <RouterLink to="/" class="brand"><span>迹</span><div><b>迹研</b><small>EVIDENCE RESEARCH</small></div></RouterLink>
-      <div class="global-search">
-        <Search :size="17" />
-        <input v-model="query" placeholder="输入代码或公司名称" aria-label="搜索股票" @focus="searchOpen = true" @keydown.enter="openSecurity(query.trim().toUpperCase())" />
-        <div v-if="searchOpen && query" class="search-results">
-          <button v-for="item in securities.data.value?.items || []" :key="item.code" @click="openSecurity(item.code)">
-            <span><b>{{ item.name || item.security_name }}</b><small>{{ item.code }}</small></span><ChevronRight :size="15" />
-          </button>
-        </div>
-      </div>
       <div class="system-status"><i :class="{ down: health.isError.value }"></i><span>{{ health.data.value ? `${Number(health.data.value.securities).toLocaleString()} 只证券` : "连接数据" }}</span></div>
     </header>
 
