@@ -85,15 +85,24 @@ export interface PaperOrder {
   reference_price?: number | null;
   target_weight?: number | null;
   reason?: Record<string, unknown>;
-  reviewer?: string | null;
-  review_note?: string | null;
   reviewed_at?: string | null;
   fill_date?: string | null;
   fill_price?: number | null;
   gross_amount?: number | null;
   fees?: number | null;
-  execution_quote_id?: string | null;
   created_at: string;
+}
+
+export interface PaperTrade {
+  trade_id: number;
+  account_id: string;
+  security_code: string;
+  security_name?: string;
+  side: "buy" | "sell";
+  quantity: number;
+  price: number;
+  fees: number;
+  traded_at: string;
 }
 
 export interface PaperOrderLedger {
@@ -101,6 +110,8 @@ export interface PaperOrderLedger {
   latest_run_id?: string | null;
   latest_as_of?: string | null;
   items: PaperOrder[];
+  proposals: PaperOrder[];
+  trades: PaperTrade[];
 }
 
 export interface MaturityItem {

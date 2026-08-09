@@ -19,9 +19,11 @@ const emit = defineEmits<{
 const activeTab = ref<LedgerTab>("current");
 const clock = ref(new Date());
 let clockTimer = 0;
-const currentOrders = computed(() => props.orders.filter((item) => item.run_id === props.latestRunId));
-const historicalOrders = computed(() => props.orders.filter((item) => item.run_id !== props.latestRunId));
-const fills = computed(() => props.orders.filter((item) => item.status === "filled"));
+const isTrade = (item: PaperOrder) => String(item.order_id).startsWith("trade:");
+const proposals = computed(() => props.orders.filter((item) => !isTrade(item)));
+const currentOrders = computed(() => proposals.value.filter((item) => item.run_id === props.latestRunId));
+const historicalOrders = computed(() => proposals.value.filter((item) => item.run_id !== props.latestRunId));
+const fills = computed(() => props.orders.filter(isTrade));
 const visibleOrders = computed(() => activeTab.value === "current"
   ? currentOrders.value
   : activeTab.value === "history" ? historicalOrders.value : fills.value);
@@ -91,10 +93,10 @@ onBeforeUnmount(() => window.clearInterval(clockTimer));
             <td v-if="activeTab === 'fills'" data-label="成交金额 / 费用"><b>{{ money(order.gross_amount) }}</b><small>费用 {{ money(order.fees) }}</small></td>
             <td v-else data-label="目标权重">{{ pct(order.target_weight) }}</td>
             <td data-label="状态"><span :class="['status', statusClass(order.status)]">{{ statusLabels[order.status] }}</span></td>
-            <td v-if="activeTab === 'fills'" data-label="成交日"><b>{{ order.fill_date || '—' }}</b><small v-if="order.execution_quote_id">实时行情留痕</small></td>
-            <td v-else data-label="复核信息"><b>{{ order.reviewer || '—' }}</b><small>{{ order.reviewed_at || (order.status === 'proposed' ? '等待人工复核' : '—') }}</small></td>
+            <td v-if="activeTab === 'fills'" data-label="成交日"><b>{{ order.fill_date || '—' }}</b></td>
+            <td v-else data-label="复核信息"><b>{{ order.reviewed_at ? '已复核' : '—' }}</b><small>{{ order.reviewed_at || (order.status === 'proposed' ? '等待人工复核' : '—') }}</small></td>
             <td class="row-actions">
-              <button class="icon-button" title="查看决策依据" aria-label="查看决策依据" @click="emit('trace', order)"><Search :size="14" /></button>
+              <button v-if="activeTab !== 'fills'" class="icon-button" title="查看决策依据" aria-label="查看决策依据" @click="emit('trace', order)"><Search :size="14" /></button>
               <template v-if="activeTab === 'current' && order.status === 'proposed'">
                 <button class="icon-button approve" title="批准提案" aria-label="批准提案" @click="emit('review', order.order_id, 'approve')"><Check :size="14" /></button>
                 <button class="icon-button reject" title="拒绝提案" aria-label="拒绝提案" @click="emit('review', order.order_id, 'reject')"><X :size="14" /></button>

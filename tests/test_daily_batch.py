@@ -9,12 +9,16 @@ from app.workflows.daily_batch import (
 )
 from app.research.store import ResearchStore
 from app.core.runtime_events import RuntimeEventStore
-from app.core.sqlite_store import SQLiteStore
+from app.paper.run_store import PaperRunStore
 
 
 def batch_store(tmp_path):
     research_store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
-    return DailyBatchStore(research_store)
+    return DailyBatchStore(
+        PaperRunStore(tmp_path / "paper"),
+        account_resolver=lambda account_id: {"account_id": account_id, "name": account_id},
+        event_store=RuntimeEventStore(research_store),
+    )
 
 
 def handlers(calls, *, fail_step=None):
@@ -134,25 +138,16 @@ def test_daily_batch_recovers_running_task_after_restart(tmp_path):
 
     recovered = batch_store(tmp_path)
 
-    assert recovered.get(batch["batch_id"])["status"] == "failed"
-    assert recovered.events.run(batch["batch_id"])["status"] == "failed"
-    assert recovered.events.events(batch["batch_id"])[-1]["event_type"] == "task_failed"
+    assert recovered.get(batch["batch_id"])["status"] == "interrupted"
 
 
-def test_daily_batch_rows_use_paper_database_while_events_stay_in_research_database(tmp_path):
+def test_daily_batch_results_use_files_while_events_stay_in_research_database(tmp_path):
     research_store = ResearchStore(tmp_path / "state.db", tmp_path / "documents")
-    legacy_store = DailyBatchStore(research_store)
-    legacy_batch, _ = legacy_store.prepare(
-        account_id="legacy-account", as_of="2026-07-22", config={"top_n": 3}
-    )
-
-    paper_store = SQLiteStore(tmp_path / "paper_trading.db")
     split_store = DailyBatchStore(
-        paper_store,
+        PaperRunStore(tmp_path / "paper"),
+        account_resolver=lambda account_id: {"account_id": account_id, "name": account_id},
         event_store=RuntimeEventStore(research_store),
-        legacy_store=research_store,
     )
-    assert split_store.get(legacy_batch["batch_id"])["account_id"] == "legacy-account"
 
     created, _ = split_store.prepare(
         account_id="split-account", as_of="2026-07-23", config={"top_n": 5}
@@ -166,17 +161,11 @@ def test_daily_batch_rows_use_paper_database_while_events_stay_in_research_datab
         domain_type="paper_daily_batch",
         domain_id=created["batch_id"],
     )
-    with paper_store.connect() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM paper_daily_batch WHERE batch_id=?", (created["batch_id"],)
-        ).fetchone()[0] == 1
-        assert "runtime_run" not in {
-            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+    assert (tmp_path / "paper" / "split-account" / "2026-07-23" / "run-001" / "manifest.json").is_file()
     with research_store.connect() as conn:
         assert conn.execute(
-            "SELECT COUNT(*) FROM paper_daily_batch WHERE batch_id=?", (created["batch_id"],)
-        ).fetchone()[0] == 0
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_daily_batch'"
+        ).fetchone() is None
         assert conn.execute(
             "SELECT COUNT(*) FROM runtime_run WHERE root_run_id=?", (created["batch_id"],)
         ).fetchone()[0] == 1

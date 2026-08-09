@@ -84,7 +84,6 @@ from app.schemas import (
     StrategyDraftUpdate,
     StrategyCodeUpdate,
     StrategyGenerateRequest,
-    PaperStrategyDeploymentCreate,
 )
 from app.thesis.store import ThesisStore
 from ..container import container
@@ -512,6 +511,9 @@ async def run_daily_research_batch(
         }
 
     async def order_proposals_step() -> dict:
+        prepared = daily_batch_store.get(batch_id)
+        if prepared is None:
+            raise RuntimeError("完整批次运行目录不存在")
         run = await run_in_threadpool(
             lambda: paper_trading_service.create_daily_run(
                 as_of=as_of,
@@ -522,6 +524,7 @@ async def run_daily_research_batch(
                 max_position_weight=request.max_position_weight,
                 max_industry_weight=request.max_industry_weight,
                 max_pair_correlation=request.max_pair_correlation,
+                run_key=prepared["run_key"],
             )
         )
         return {
@@ -530,6 +533,7 @@ async def run_daily_research_batch(
             "status": run["status"],
             "strategy_version": run["strategy_version"],
             "order_count": len(run.get("orders", [])),
+            "orders": run.get("orders", []),
             "reused": run.get("reused", False),
         }
 

@@ -14,8 +14,8 @@ class PaperBenchmarkMixin:
         date.fromisoformat(end)
         with self.paper_store.connect() as conn:
             row = conn.execute(
-                """SELECT MIN(fill_date) FROM paper_order
-                   WHERE status='filled' AND fill_date<=?""",
+                """SELECT MIN(substr(traded_at,1,10)) FROM paper_trade
+                   WHERE substr(traded_at,1,10)<=?""",
                 (end,),
             ).fetchone()
         start = (
@@ -71,8 +71,8 @@ class PaperBenchmarkMixin:
         comparison_end = max(as_of, live_date) if live_date else as_of
         with self.paper_store.connect() as conn:
             first_fill_row = conn.execute(
-                """SELECT MIN(fill_date) FROM paper_order
-                   WHERE account_id=? AND status='filled' AND fill_date<=?""",
+                """SELECT MIN(substr(traded_at,1,10)) FROM paper_trade
+                   WHERE account_id=? AND substr(traded_at,1,10)<=?""",
                 (account["account_id"], comparison_end),
             ).fetchone()
         inception = first_fill_row[0] if first_fill_row else None
@@ -112,12 +112,12 @@ class PaperBenchmarkMixin:
             dates.append(live_date)
             dates.sort()
         prior_nav = [row for row in nav_rows if row["trading_date"] < inception]
-        baseline_nav = float(prior_nav[-1]["nav"]) if prior_nav else float(account["initial_cash"])
+        baseline_nav = float(prior_nav[-1]["total_equity"]) if prior_nav else float(account["initial_cash"])
         baseline_nav_date = prior_nav[-1]["trading_date"] if prior_nav else None
         portfolio_points = [
             {
                 "date": row["trading_date"],
-                "cumulative_return": float(row["nav"]) / baseline_nav - 1,
+                "cumulative_return": float(row["total_equity"]) / baseline_nav - 1,
             }
             for row in eligible_nav
         ]

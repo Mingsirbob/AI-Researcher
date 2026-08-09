@@ -11,12 +11,18 @@ const orders: PaperOrder[] = [
     quantity: 100, reference_price: 12.3, target_weight: 0.1, created_at: "2026-08-04T18:00:00+08:00",
   },
   {
-    order_id: "historical-fill", run_id: "run-old", account_id: "account-1",
+    order_id: "historical-proposal", run_id: "run-old", account_id: "account-1",
     as_of: "2026-08-01", run_status: "completed", strategy_version: "strategy@1",
     security_code: "000408.SZ", security_name: "藏格矿业", side: "sell", status: "filled",
-    quantity: 1300, reference_price: 48, target_weight: 0, reviewer: "human",
-    reviewed_at: "2026-08-01T08:30:00+08:00", fill_date: "2026-08-04", fill_price: 47.8,
-    gross_amount: 62140, fees: 68, created_at: "2026-08-01T18:00:00+08:00",
+    quantity: 1300, reference_price: 48, target_weight: 0,
+    reviewed_at: "2026-08-01T08:30:00+08:00", created_at: "2026-08-01T18:00:00+08:00",
+  },
+  {
+    order_id: "trade:1", run_id: "", account_id: "account-1",
+    as_of: "2026-08-04", run_status: "completed", strategy_version: "",
+    security_code: "000408.SZ", security_name: "藏格矿业", side: "sell", status: "filled",
+    quantity: 1300, fill_date: "2026-08-04", fill_price: 47.8,
+    gross_amount: 62140, fees: 68, created_at: "2026-08-04",
   },
 ];
 

@@ -125,65 +125,24 @@ def _set_assessment_signal(store: ResearchStore, code: str, signal: str) -> None
         )
 
 
-def test_separate_paper_database_migrates_legacy_data_and_isolates_new_writes(tmp_path):
-    legacy_service, research_store = _service(tmp_path)
-    legacy_account = _insert_position(
-        legacy_service, research_store, code="000002.SZ", available_quantity=100
-    )
-    legacy_run = legacy_service.create_daily_run(
-        as_of="2026-07-20",
-        account_id=legacy_account["account_id"],
-        top_n=1,
-        hold_rank_buffer=30,
-    )
-    with research_store.connect() as conn:
-        conn.execute(
-            "UPDATE security_master SET security_name='迁移测试证券' WHERE security_code='000002.SZ'"
-        )
-        legacy_counts = {
-            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("paper_account", "paper_position", "paper_daily_run", "paper_order")
-        }
-
+def test_separate_paper_database_contains_only_v2_business_tables(tmp_path):
+    service, research_store = _service(tmp_path)
     paper_store = SQLiteStore(tmp_path / "paper_trading.db")
     split_service = PaperTradingService(
-        legacy_service.repository,
-        research_store,
-        paper_store=paper_store,
-        quant_store=legacy_service.quant_store,
+        service.repository, research_store, paper_store=paper_store,
+        quant_store=service.quant_store,
     )
-
-    with paper_store.connect() as conn:
-        migrated_counts = {
-            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in legacy_counts
-        }
-    assert migrated_counts == legacy_counts
-    assert split_service.run(legacy_run["run_id"])["run_id"] == legacy_run["run_id"]
-    dashboard = split_service.dashboard(legacy_account["account_id"], "2026-07-20")
-    assert dashboard["positions"][0]["security_name"] == "迁移测试证券"
-
-    created = split_service.create_account("拆库后账户", 500_000, "000300.SH")
-    with paper_store.connect() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM paper_account WHERE account_id=?", (created["account_id"],)
-        ).fetchone()[0] == 1
-    with research_store.connect() as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM paper_account WHERE account_id=?", (created["account_id"],)
-        ).fetchone()[0] == 0
-
-    PaperTradingService(
-        legacy_service.repository,
-        research_store,
-        paper_store=paper_store,
-        quant_store=legacy_service.quant_store,
+    split_service.create_account(
+        "拆库后账户", 500_000, "000300.SH", LIGHTGBM_SHADOW_STRATEGY_ID
     )
     with paper_store.connect() as conn:
-        assert {
-            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in legacy_counts
-        } == {**legacy_counts, "paper_account": legacy_counts["paper_account"] + 1}
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )}
+    assert tables == {
+        "paper_account", "paper_proposal", "paper_trade", "paper_position",
+        "paper_nav_snapshot",
+    }
 
 
 def test_accounts_bind_independent_strategy_contracts(tmp_path):
@@ -204,6 +163,24 @@ def test_accounts_bind_independent_strategy_contracts(tmp_path):
     assert {item["strategy_id"] for item in service.list_strategies()} == {
         LIGHTGBM_SHADOW_STRATEGY_ID, MULTIFACTOR_LINEAR_STRATEGY_ID,
     }
+
+
+def test_archiving_account_preserves_history_and_prevents_future_use(tmp_path):
+    service, _ = _service(tmp_path)
+    account = service.default_account()
+
+    assert service.archive_account(account["account_id"]) is True
+    assert service.list_accounts() == []
+    assert service.archive_account(account["account_id"]) is False
+    with pytest.raises(KeyError, match="不存在或已停用"):
+        service.account(account["account_id"])
+
+    with service.paper_store.connect() as conn:
+        stored = conn.execute(
+            "SELECT status FROM paper_account WHERE account_id=?",
+            (account["account_id"],),
+        ).fetchone()
+    assert stored["status"] == "archived"
 
 
 def test_multifactor_account_uses_factor_ranking_not_lightgbm_shadow(tmp_path):
@@ -253,11 +230,29 @@ def _insert_position(
         conn.execute(
             """INSERT INTO paper_position
                (account_id, security_code, quantity, available_quantity, average_cost,
-                realized_pnl, last_buy_date, updated_at)
-               VALUES (?, ?, 100, ?, 20, 0, '2026-07-20', '2026-07-20T08:00:00+00:00')""",
+                last_buy_date, updated_at)
+               VALUES (?, ?, 100, ?, 20, '2026-07-20', '2026-07-20T08:00:00+00:00')""",
             (account["account_id"], code, available_quantity),
         )
     return account
+
+
+def _record_trade(service: PaperTradingService, account_id: str, proposal_id: int,
+                  *, traded_at: str = "2026-07-21", price: float = 11.0) -> None:
+    with service.paper_store.connect() as conn:
+        proposal = conn.execute(
+            "SELECT * FROM paper_proposal WHERE proposal_id=?", (proposal_id,)
+        ).fetchone()
+        conn.execute(
+            "UPDATE paper_proposal SET status='filled' WHERE proposal_id=?", (proposal_id,)
+        )
+        conn.execute(
+            """INSERT INTO paper_trade
+            (account_id,security_code,side,quantity,price,fees,traded_at)
+            VALUES (?,?,?,?,?,0,?)""",
+            (account_id, proposal["security_code"], proposal["side"],
+             proposal["quantity"], price, traded_at),
+        )
 
 
 class RealtimeProvider:
@@ -285,18 +280,25 @@ class RealtimeProvider:
         } for code in codes if code in prices]
 
 
-def test_realtime_quote_latest_lookup_has_matching_index(tmp_path):
+def test_realtime_quote_table_is_not_part_of_paper_schema(tmp_path):
     _, store = _service(tmp_path)
 
     with store.connect() as conn:
-        columns = [
-            row[2]
-            for row in conn.execute(
-                "PRAGMA index_info('idx_paper_realtime_quote_latest')"
-            ).fetchall()
-        ]
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_realtime_quote'"
+        ).fetchone()
+        order_columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_proposal)")}
 
-    assert columns == ["account_id", "security_code", "received_at"]
+    assert table is None
+    assert "execution_quote_id" not in order_columns
+
+
+def test_trade_schema_has_no_proposal_or_run_reference(tmp_path):
+    _, store = _service(tmp_path)
+    with store.connect() as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_trade)")}
+    assert "proposal_id" not in columns
+    assert "run_key" not in columns
 
 
 def test_portfolio_planning_does_not_mutate_paper_account_state(tmp_path):
@@ -306,11 +308,10 @@ def test_portfolio_planning_does_not_mutate_paper_account_state(tmp_path):
     positions = service._positions(account["account_id"], "2026-07-20", shadow["snapshot_id"])
     tables = (
         "paper_account",
-        "paper_daily_run",
-        "paper_order",
+        "paper_proposal",
+        "paper_trade",
         "paper_position",
         "paper_nav_snapshot",
-        "paper_realtime_quote",
     )
     with store.connect() as conn:
         before = {table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables}
@@ -387,13 +388,9 @@ def test_execution_service_persists_supplied_portfolio_plan(tmp_path):
 
     assert run["config"] == {"source": "stub-plan"}
     assert run["market_summary"] == {"planned": True}
-    assert run["orders"][0]["order_id"] == "stub-order"
+    assert isinstance(run["orders"][0]["order_id"], int)
     assert run["orders"][0]["reason"] == {"rule": "stubbed_decision"}
-    with store.connect() as conn:
-        stored = conn.execute(
-            "SELECT snapshot_hash FROM paper_daily_run WHERE run_id=?", (run["run_id"],)
-        ).fetchone()
-    assert stored["snapshot_hash"] == "stub-plan-hash"
+    assert service.run_store.manifest(run["run_id"])["snapshot_hash"] == "stub-plan-hash"
 
 
 def test_local_price_uses_latest_row_at_or_before_as_of(tmp_path):
@@ -425,12 +422,13 @@ def test_daily_run_requires_review_and_fills_only_after_as_of(tmp_path):
     assert dashboard["account"]["cash"] < dashboard["account"]["initial_cash"]
 
 
-def test_daily_run_is_idempotent(tmp_path):
+def test_daily_run_uses_incrementing_same_day_directories(tmp_path):
     service, _ = _service(tmp_path)
     first = service.create_daily_run(as_of="2026-07-20", account_id=None, top_n=1, hold_rank_buffer=30)
     second = service.create_daily_run(as_of="2026-07-20", account_id=first["account_id"], top_n=1, hold_rank_buffer=30)
-    assert second["run_id"] == first["run_id"]
-    assert second["reused"] is True
+    assert first["run_id"].endswith("run-001")
+    assert second["run_id"].endswith("run-002")
+    assert second["reused"] is False
 
 
 def test_benchmark_comparison_uses_common_inception_and_aligned_nav_dates(tmp_path):
@@ -438,20 +436,16 @@ def test_benchmark_comparison_uses_common_inception_and_aligned_nav_dates(tmp_pa
     account = service.default_account()
     service._mark_nav(account, "2026-07-20")
     run = service.create_daily_run(as_of="2026-07-20", account_id=None, top_n=1, hold_rank_buffer=30)
+    _record_trade(service, account["account_id"], run["orders"][0]["order_id"])
     with store.connect() as conn:
         conn.execute(
-            """UPDATE paper_order SET status='filled', fill_date='2026-07-21', fill_price=11
-               WHERE order_id=?""",
-            (run["orders"][0]["order_id"],),
-        )
-        conn.execute(
-            "UPDATE paper_account SET cash=990000 WHERE account_id=?",
+            "UPDATE paper_account SET current_cash=990000 WHERE account_id=?",
             (account["account_id"],),
         )
     service._mark_nav(service.account(account["account_id"]), "2026-07-21")
     with store.connect() as conn:
         conn.execute(
-            "UPDATE paper_account SET cash=1020000 WHERE account_id=?",
+            "UPDATE paper_account SET current_cash=1020000 WHERE account_id=?",
             (account["account_id"],),
         )
     service._mark_nav(service.account(account["account_id"]), "2026-07-22")
@@ -493,14 +487,10 @@ def test_benchmark_comparison_adds_intraday_points_without_overwriting_daily_pri
     run = service.create_daily_run(
         as_of="2026-07-20", account_id=account["account_id"], top_n=1, hold_rank_buffer=30
     )
+    _record_trade(service, account["account_id"], run["orders"][0]["order_id"])
     with store.connect() as conn:
         conn.execute(
-            """UPDATE paper_order SET status='filled', fill_date='2026-07-21', fill_price=11
-               WHERE order_id=?""",
-            (run["orders"][0]["order_id"],),
-        )
-        conn.execute(
-            "UPDATE paper_account SET cash=1010000 WHERE account_id=?",
+            "UPDATE paper_account SET current_cash=1010000 WHERE account_id=?",
             (account["account_id"],),
         )
     service._mark_nav(service.account(account["account_id"]), "2026-07-21")
@@ -531,12 +521,7 @@ def test_benchmark_comparison_rejects_missing_inception_as_partial(tmp_path):
     service, store = _service(tmp_path)
     account = service.default_account()
     run = service.create_daily_run(as_of="2026-07-20", account_id=None, top_n=1, hold_rank_buffer=30)
-    with store.connect() as conn:
-        conn.execute(
-            """UPDATE paper_order SET status='filled', fill_date='2026-07-21', fill_price=11
-               WHERE order_id=?""",
-            (run["orders"][0]["order_id"],),
-        )
+    _record_trade(service, account["account_id"], run["orders"][0]["order_id"])
     service._mark_nav(account, "2026-07-21")
     service.save_benchmark_prices([
         {"thscode": code, "time": "2026-07-21", "close": 100.0}
@@ -613,39 +598,23 @@ def test_execution_skips_suspended_day_and_waits_for_next_tradable_open(tmp_path
 
 
 def test_current_strategy_cancels_approved_unfilled_prior_run(tmp_path):
-    service, store = _service(tmp_path)
+    service, _ = _service(tmp_path)
     current = service.create_daily_run(
         as_of="2026-07-20", account_id=None, top_n=1, hold_rank_buffer=30
     )
-    with store.connect() as conn:
-        conn.execute(
-            """INSERT INTO paper_daily_run VALUES
-            ('legacy-run', ?, '2026-07-19', 'factor-1', 'shadow-1', 'legacy-v1',
-             'awaiting_review', '{}', '{}', 'legacy-hash', '2026-07-19T09:00:00+00:00')""",
-            (current["account_id"],),
-        )
-        conn.execute(
-            """INSERT INTO paper_order
-            (order_id, run_id, account_id, security_code, side, quantity, reference_price,
-             target_weight, reason_json, status, reviewer, review_note, reviewed_at, created_at)
-            VALUES ('legacy-order','legacy-run',?,'000001.SZ','buy',100,10,.1,'{}',
-                    'approved','human','原人工批准','2026-07-20T10:00:00+00:00','2026-07-20T09:00:00+00:00')""",
-            (current["account_id"],),
-        )
+    old_id = current["orders"][0]["order_id"]
+    service.review_order(old_id, "approve")
     service.create_daily_run(
         as_of="2026-07-20", account_id=current["account_id"], top_n=1, hold_rank_buffer=30
     )
-    with store.connect() as conn:
-        order = conn.execute("SELECT status, reviewer, review_note FROM paper_order WHERE order_id='legacy-order'").fetchone()
-        run_status = conn.execute("SELECT status FROM paper_daily_run WHERE run_id='legacy-run'").fetchone()[0]
-    assert order["status"] == "cancelled"
-    assert order["reviewer"] == "human"
-    assert "原人工批准" in order["review_note"]
-    assert "替代" in order["review_note"]
-    assert run_status == "superseded"
+    with service.paper_store.connect() as conn:
+        status = conn.execute(
+            "SELECT status FROM paper_proposal WHERE proposal_id=?", (old_id,)
+        ).fetchone()[0]
+    assert status == "cancelled"
 
 
-def test_realtime_refresh_persists_quote_and_settles_latest_run_at_realtime_price(tmp_path):
+def test_realtime_refresh_is_ephemeral_and_settles_latest_run_at_realtime_price(tmp_path):
     provider = RealtimeProvider()
     service, store = _service(tmp_path, provider)
     run = service.create_daily_run(
@@ -655,24 +624,8 @@ def test_realtime_refresh_persists_quote_and_settles_latest_run_at_realtime_pric
     service.review_order(order["order_id"], "approve", "tester", "批准模拟订单")
     with store.connect() as conn:
         conn.execute(
-            "UPDATE paper_order SET reviewed_at='2026-07-23T08:00:00+08:00' WHERE order_id=?",
+            "UPDATE paper_proposal SET reviewed_at='2026-07-23T08:00:00+08:00' WHERE proposal_id=?",
             (order["order_id"],),
-        )
-        conn.execute(
-            """INSERT INTO paper_daily_run VALUES
-            ('stale-run', ?, '2026-07-19', 'factor-1', 'shadow-1', 'stale-v1',
-             'approved_waiting_execution', '{}', '{}', 'stale-hash',
-             '2026-07-19T09:00:00+00:00')""",
-            (run["account_id"],),
-        )
-        conn.execute(
-            """INSERT INTO paper_order
-            (order_id, run_id, account_id, security_code, side, quantity, reference_price,
-             target_weight, reason_json, status, reviewer, review_note, reviewed_at, created_at)
-            VALUES ('stale-order','stale-run',?,'000002.SZ','buy',100,20,.1,'{}',
-                    'approved','human','旧批次','2026-07-19T10:00:00+08:00',
-                    '2026-07-19T09:00:00+00:00')""",
-            (run["account_id"],),
         )
 
     result = service.settle_realtime(now=datetime.fromisoformat("2026-07-23T10:05:00+08:00"))
@@ -681,12 +634,10 @@ def test_realtime_refresh_persists_quote_and_settles_latest_run_at_realtime_pric
     assert result["run_id"] == run["run_id"]
     assert result["filled"][0]["fill_date"] == "2026-07-23"
     assert result["filled"][0]["fill_price"] == pytest.approx(13.1 * 1.0005)
-    assert result["filled"][0]["execution_quote_id"]
+    assert "execution_quote_id" not in result["filled"][0]
     assert service.run(run["run_id"])["status"] == "completed"
     with store.connect() as conn:
-        assert conn.execute(
-            "SELECT status FROM paper_order WHERE order_id='stale-order'"
-        ).fetchone()[0] == "approved"
+        assert conn.execute("SELECT COUNT(*) FROM paper_trade").fetchone()[0] == 1
     dashboard = service.dashboard(as_of="2026-07-22")
     position = dashboard["positions"][0]
     assert position["close"] == 13.1
@@ -697,7 +648,9 @@ def test_realtime_refresh_persists_quote_and_settles_latest_run_at_realtime_pric
     assert position["risk_flags"] == ["position_weight_limit", "t1_locked"]
     assert position["price_source"] == "iFinD THS_RQ"
     with store.connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM paper_realtime_quote").fetchone()[0] == 7
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_realtime_quote'"
+        ).fetchone() is None
 
 
 def test_realtime_settlement_fills_order_approved_after_market_open(tmp_path):
@@ -710,7 +663,7 @@ def test_realtime_settlement_fills_order_approved_after_market_open(tmp_path):
     service.review_order(order["order_id"], "approve", "tester", "批准模拟订单")
     with store.connect() as conn:
         conn.execute(
-            "UPDATE paper_order SET reviewed_at='2026-07-23T10:00:00+08:00' WHERE order_id=?",
+            "UPDATE paper_proposal SET reviewed_at='2026-07-23T10:00:00+08:00' WHERE proposal_id=?",
             (order["order_id"],),
         )
 
@@ -732,7 +685,7 @@ def test_realtime_settlement_rejects_quote_older_than_approval(tmp_path):
     service.review_order(order["order_id"], "approve", "tester", "批准模拟订单")
     with store.connect() as conn:
         conn.execute(
-            "UPDATE paper_order SET reviewed_at='2026-07-23T10:02:00+08:00' WHERE order_id=?",
+            "UPDATE paper_proposal SET reviewed_at='2026-07-23T10:02:00+08:00' WHERE proposal_id=?",
             (order["order_id"],),
         )
 
@@ -781,37 +734,21 @@ def test_order_ledger_returns_proposal_review_and_fill_history(tmp_path):
     item = ledger["items"][0]
     assert item["security_name"]
     assert item["status"] == "filled"
-    assert item["reviewer"] == "tester"
-    assert item["fill_date"] == "2026-07-21"
-    assert item["fill_price"] is not None
-    assert item["fees"] is not None
+    assert item["reviewed_at"] is not None
+    assert len(ledger["trades"]) == 1
+    assert ledger["trades"][0]["traded_at"] == "2026-07-21"
+    assert ledger["trades"][0]["price"] is not None
+    assert ledger["trades"][0]["fees"] is not None
+    assert "proposal_id" not in ledger["trades"][0]
 
 
-def test_legacy_automatic_unfilled_approval_returns_to_manual_review(tmp_path):
+def test_proposal_review_schema_only_keeps_reviewed_at(tmp_path):
     service, store = _service(tmp_path)
-    run = service.create_daily_run(
-        as_of="2026-07-20", account_id=None, top_n=1, hold_rank_buffer=30
-    )
-    order_id = run["orders"][0]["order_id"]
     with store.connect() as conn:
-        conn.execute(
-            """UPDATE paper_order SET status='approved', reviewer='paper-auto-scheduler',
-               review_note='旧自动审批', reviewed_at='2026-07-20T18:10:00+08:00'
-               WHERE order_id=?""",
-            (order_id,),
-        )
-        conn.execute(
-            "DELETE FROM schema_migration WHERE migration_id='0030_manual_paper_approval'"
-        )
-
-    rebuilt = PaperTradingService(
-        service.repository, store, quant_store=service.quant_store
-    )
-    order = rebuilt.run(run["run_id"])["orders"][0]
-
-    assert order["status"] == "proposed"
-    assert order["reviewer"] is None
-    assert order["reviewed_at"] is None
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_proposal)")}
+    assert "reviewed_at" in columns
+    assert "reviewer" not in columns
+    assert "review_note" not in columns
 
 
 def test_missing_research_assessment_defers_new_position(tmp_path):

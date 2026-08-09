@@ -842,6 +842,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/paper/accounts/{account_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Paper Account */
+        delete: operations["delete_paper_account_api_paper_accounts__account_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/paper/strategies": {
         parameters: {
             query?: never;
@@ -870,23 +887,6 @@ export interface paths {
         get: operations["paper_scheduler_status_api_paper_scheduler_status_get"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/paper/accounts/{account_id}/deployments": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Deploy Paper Strategy */
-        post: operations["deploy_paper_strategy_api_paper_accounts__account_id__deployments_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1640,19 +1640,8 @@ export interface components {
              * @default 1000000
              */
             initial_cash: number;
-            /**
-             * Benchmark Code
-             * @default 000300.SH
-             * @enum {string}
-             */
-            benchmark_code: "000300.SH" | "000905.SH" | "000852.SH";
-            /**
-             * Strategy Id
-             * @default lightgbm_shadow_v1
-             */
-            strategy_id: string;
-            /** Strategy Version Id */
-            strategy_version_id?: string | null;
+            /** Strategy Name */
+            strategy_name: string;
         };
         /** PaperBenchmarkRefresh */
         PaperBenchmarkRefresh: {
@@ -1745,18 +1734,7 @@ export interface components {
             max_pair_correlation?: number | null;
         };
         /** PaperOrderReview */
-        PaperOrderReview: {
-            /**
-             * Reviewer
-             * @default human
-             */
-            reviewer: string;
-            /**
-             * Note
-             * @default 人工确认模拟订单
-             */
-            note: string;
-        };
+        PaperOrderReview: Record<string, never>;
         /** PaperRealtimeRequest */
         PaperRealtimeRequest: {
             /** Account Id */
@@ -1811,11 +1789,6 @@ export interface components {
             execution_date?: string | null;
             /** Account Id */
             account_id?: string | null;
-        };
-        /** PaperStrategyDeploymentCreate */
-        PaperStrategyDeploymentCreate: {
-            /** Strategy Version Id */
-            strategy_version_id: string;
         };
         /** ResearchCandidateCreate */
         ResearchCandidateCreate: {
@@ -3730,6 +3703,35 @@ export interface operations {
             };
         };
     };
+    delete_paper_account_api_paper_accounts__account_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_paper_strategies_api_paper_strategies_get: {
         parameters: {
             query?: never;
@@ -3770,43 +3772,6 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
-                };
-            };
-        };
-    };
-    deploy_paper_strategy_api_paper_accounts__account_id__deployments_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                account_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PaperStrategyDeploymentCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

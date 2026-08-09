@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { Plus, Play, RefreshCw, Search, X } from "lucide-vue-next";
+import { Plus, Play, RefreshCw, Search, Trash2, X } from "lucide-vue-next";
 import { api, jsonBody, openApiJsonBody } from "@/api/client";
 import type { OpenApiSchema } from "@/api/client";
 import type { BenchmarkSeries, ChartSeries, DailyBatch, PaperOrder, PaperOrderLedger, PaperTarget } from "@/api/types";
@@ -27,8 +27,8 @@ interface Comparison {
   limitations?: string[];
 }
 interface PaperStrategy { strategy_id: string; version: string; name: string; description: string; signal_source: string; config: Record<string, unknown> }
-interface PaperAccount { account_id: string; name: string; status?: string; initial_cash: number; cash: number; benchmark_code: string; strategy_id: string; strategy: PaperStrategy }
-interface StrategyVersion { strategy_version_id: string; name: string; version: number; strategy_kind?: string }
+interface PaperAccount { account_id: string; name: string; status?: string; initial_cash: number; current_cash: number; cash: number; strategy_name: string; strategy: PaperStrategy }
+interface StrategyChoice { value: string; label: string }
 interface PaperDashboard { as_of: string; nav: number; cumulative_return: number; cash_weight: number; account: PaperAccount; positions: PaperPosition[]; runs: PaperRun[]; nav_history: Array<{ drawdown?: number }>; benchmark_comparison: Comparison; latest_shadow?: { snapshot_id: string; as_of: string; status: string } | null; realtime?: { quote_count: number; latest_quote_time?: string | null; high_frequency_used?: boolean } }
 interface TargetSet { targets: PaperTarget[] }
 interface FeatureSnapshot { snapshot_id: string; as_of: string; status: string }
@@ -39,10 +39,9 @@ interface PaperSettlementResult { filled: Array<{ order_id: string }>; skipped: 
 
 const ui = useUiStore();
 const client = useQueryClient();
-const asOf = ref("");
 const selectedAccountId = ref("");
 const showAccountForm = ref(false);
-const accountForm = reactive({ name: "", initial_cash: 1_000_000, benchmark_code: "000300.SH", strategy_id: "lightgbm_shadow_v1", strategy_version_id: "" });
+const accountForm = reactive({ name: "", initial_cash: 1_000_000, strategy_selection: "" });
 const batchId = ref("");
 const poll = ref(0);
 const realtimePoll = ref(0);
@@ -51,17 +50,37 @@ const realtimeError = ref("");
 const trace = ref<TraceState | null>(null);
 const accounts = useQuery({ queryKey: ["paper", "accounts"], queryFn: () => api<{ items: PaperAccount[] }>("/api/paper/accounts") });
 const strategies = useQuery({ queryKey: ["paper", "strategies"], queryFn: () => api<{ items: PaperStrategy[] }>("/api/paper/strategies") });
-const strategyVersions = useQuery({ queryKey: ["strategy", "versions"], queryFn: () => api<{ items: StrategyVersion[] }>("/api/strategy-versions") });
+const strategyChoices = computed<StrategyChoice[]>(() =>
+  (strategies.data.value?.items || []).map((item) => ({
+    value: item.name,
+    label: `${item.name} · ${item.version}`,
+  })),
+);
+watch(strategyChoices, (items) => { if (!accountForm.strategy_selection && items.length) accountForm.strategy_selection = items[0].value; }, { immediate: true });
 watch(() => accounts.data.value?.items, (items) => { if (!selectedAccountId.value && items?.length) selectedAccountId.value = items[0].account_id; }, { immediate: true });
 watch(selectedAccountId, () => { batchId.value = ""; trace.value = null; });
-const dashboard = useQuery({ queryKey: computed(() => ["paper", "dashboard", selectedAccountId.value, asOf.value]), queryFn: () => { const params = new URLSearchParams(); params.set("account_id", selectedAccountId.value); if (asOf.value) params.set("as_of", asOf.value); return api<PaperDashboard>(`/api/paper/dashboard?${params}`); }, enabled: computed(() => Boolean(selectedAccountId.value)) });
+const dashboard = useQuery({ queryKey: computed(() => ["paper", "dashboard", selectedAccountId.value]), queryFn: () => api<PaperDashboard>(`/api/paper/dashboard?account_id=${encodeURIComponent(selectedAccountId.value)}`), enabled: computed(() => Boolean(selectedAccountId.value)) });
 const orderLedger = useQuery({ queryKey: computed(() => ["paper", "orders", selectedAccountId.value]), queryFn: () => api<PaperOrderLedger>(`/api/paper/orders?account_id=${encodeURIComponent(selectedAccountId.value)}&limit=2000`), enabled: computed(() => Boolean(selectedAccountId.value)) });
+const ledgerRows = computed<PaperOrder[]>(() => [
+  ...(orderLedger.data.value?.proposals || []),
+  ...(orderLedger.data.value?.trades || []).map((trade) => ({
+    order_id: `trade:${trade.trade_id}`, run_id: "", account_id: trade.account_id,
+    as_of: trade.traded_at.slice(0, 10), run_status: "completed", strategy_version: "",
+    security_code: trade.security_code, security_name: trade.security_name,
+    side: trade.side, status: "filled" as const, quantity: trade.quantity,
+    fill_date: trade.traded_at, fill_price: trade.price,
+    gross_amount: trade.quantity * trade.price, fees: trade.fees, created_at: trade.traded_at,
+  })),
+]);
 const featureSnapshot = useQuery({ queryKey: ["paper", "feature-snapshot", "latest"], queryFn: () => api<FeatureSnapshot>("/api/factor-snapshots/latest"), retry: false });
 const data = computed(() => dashboard.data.value);
-const researchDate = computed(() => asOf.value || data.value?.latest_shadow?.as_of || "");
+const noAccounts = computed(() => Boolean(accounts.data.value && accounts.data.value.items.length === 0));
+const pageLoading = computed(() => accounts.isPending.value || (Boolean(selectedAccountId.value) && dashboard.isPending.value));
+const pageError = computed(() => accounts.error.value || dashboard.error.value);
+const researchDate = computed(() => data.value?.latest_shadow?.as_of || "");
 const latestResearchContractReady = computed(() => Boolean(data.value?.latest_shadow?.as_of && data.value.latest_shadow.as_of === featureSnapshot.data.value?.as_of));
-const targets = useQuery({ queryKey: computed(() => ["paper", "targets", selectedAccountId.value, researchDate.value]), queryFn: () => api<TargetSet>(`/api/paper/research-targets?as_of=${researchDate.value}&account_id=${selectedAccountId.value}&limit=5&hold_rank_buffer=30`), enabled: computed(() => Boolean(selectedAccountId.value && researchDate.value && (asOf.value || latestResearchContractReady.value))) });
-const latestBatch = useQuery({ queryKey: computed(() => ["paper", "batch", "latest", data.value?.account?.account_id, asOf.value]), queryFn: () => api<{ item: DailyBatch | null }>(`/api/paper/daily-batches/latest?account_id=${data.value?.account.account_id}${asOf.value ? `&as_of=${asOf.value}` : ""}`), enabled: computed(() => Boolean(data.value?.account?.account_id)) });
+const targets = useQuery({ queryKey: computed(() => ["paper", "targets", selectedAccountId.value, researchDate.value]), queryFn: () => api<TargetSet>(`/api/paper/research-targets?as_of=${researchDate.value}&account_id=${selectedAccountId.value}&limit=5&hold_rank_buffer=30`), enabled: computed(() => Boolean(selectedAccountId.value && researchDate.value && latestResearchContractReady.value)) });
+const latestBatch = useQuery({ queryKey: computed(() => ["paper", "batch", "latest", data.value?.account?.account_id]), queryFn: () => api<{ item: DailyBatch | null }>(`/api/paper/daily-batches/latest?account_id=${data.value?.account.account_id}`), enabled: computed(() => Boolean(data.value?.account?.account_id)) });
 watch(() => latestBatch.data.value?.item?.batch_id, (value) => { if (value && !batchId.value) batchId.value = value; }, { immediate: true });
 const latestRun = computed(() => data.value?.runs?.[0]);
 const activeStrategy = computed(() => data.value?.account?.strategy);
@@ -110,8 +129,12 @@ const evidence = computed(() => (assessment.value.fundamental_evidence as Eviden
 const negatives = computed(() => (assessment.value.material_negatives as EvidenceLine[] | undefined) || []);
 const limitations = computed(() => (assessment.value.limitations as string[] | undefined) || []);
 async function reload(message?: string) { await client.invalidateQueries({ queryKey: ["paper"] }); if (message) ui.notify(message); }
+function retryPageLoad() {
+  if (accounts.error.value || !selectedAccountId.value) void accounts.refetch();
+  else void dashboard.refetch();
+}
 async function refreshRealtime(notify = false) {
-  if (!selectedAccountId.value || asOf.value || document.visibilityState === "hidden" || realtimeRefreshing.value) return;
+  if (!selectedAccountId.value || document.visibilityState === "hidden" || realtimeRefreshing.value) return;
   realtimeRefreshing.value = true;
   try {
     await api("/api/paper/realtime-quotes/refresh", { method: "POST", ...openApiJsonBody<"PaperRealtimeRequest">({ account_id: selectedAccountId.value }) });
@@ -127,20 +150,54 @@ async function refreshRealtime(notify = false) {
 }
 function startRealtimePolling() {
   window.clearInterval(realtimePoll.value);
-  if (!selectedAccountId.value || asOf.value || document.visibilityState === "hidden") return;
+  if (!selectedAccountId.value || document.visibilityState === "hidden") return;
   void refreshRealtime();
   realtimePoll.value = window.setInterval(() => void refreshRealtime(), 30_000);
 }
 function handleVisibilityChange() { startRealtimePolling(); }
-const daily = useMutation({ mutationFn: () => api<PaperRun>("/api/paper/daily-runs", { method: "POST", ...openApiJsonBody<"PaperDailyRunCreate">({ as_of: asOf.value || null, account_id: selectedAccountId.value, top_n: 5, hold_rank_buffer: 30 }) }), onSuccess: () => reload("每日研究批次已生成"), onError: notifyError });
+const daily = useMutation({ mutationFn: () => api<PaperRun>("/api/paper/daily-runs", { method: "POST", ...openApiJsonBody<"PaperDailyRunCreate">({ as_of: null, account_id: selectedAccountId.value, top_n: 5, hold_rank_buffer: 30 }) }), onSuccess: () => reload("每日研究批次已生成"), onError: notifyError });
 const assess = useMutation({ mutationFn: () => api<{ completed: number; results: unknown[] }>("/api/paper/research-assessments", { method: "POST", ...openApiJsonBody<"PaperResearchBatchRequest">({ as_of: researchDate.value || null, account_id: selectedAccountId.value, include_holdings: true, limit: 5, hold_rank_buffer: 30, lookback_days: 730, financial_download_limit: 2, announcement_download_limit: 3, depth: "quick" }) }), onSuccess: async (result) => { ui.notify(`候选研究完成 ${result.completed}/${result.results.length}`); await reload(); }, onError: notifyError });
-const benchmark = useMutation({ mutationFn: () => api<{ benchmark_count: number }>("/api/paper/benchmarks/refresh", { method: "POST", ...openApiJsonBody<"PaperBenchmarkRefresh">({ account_id: data.value?.account?.account_id, as_of: asOf.value || data.value?.benchmark_comparison?.as_of || data.value?.as_of }) }), onSuccess: async (result) => { ui.notify(`已更新 ${result.benchmark_count} 个指数基准`); await reload(); }, onError: notifyError });
-const full = useMutation({ mutationFn: () => api<DailyBatch & { reused: boolean }>("/api/paper/daily-batches", { method: "POST", ...openApiJsonBody<"PaperDailyBatchRequest">({ as_of: asOf.value || null, account_id: selectedAccountId.value, shadow_lookback_days: 240, shadow_batch_size: 20, top_n: 5, hold_rank_buffer: 30, research_lookback_days: 730, financial_download_limit: 2, announcement_download_limit: 3, depth: "quick" }) }), onSuccess: (result) => { batchId.value = result.batch_id; ui.notify(result.reused ? "已复用每日完整批次" : "完整批次已开始"); startPoll(); }, onError: notifyError });
-const createAccount = useMutation({ mutationFn: () => api<PaperAccount>("/api/paper/accounts", { method: "POST", ...jsonBody({ ...accountForm, strategy_version_id: accountForm.strategy_version_id || null }) }), onSuccess: async (account) => { selectedAccountId.value = account.account_id; showAccountForm.value = false; accountForm.name = ""; accountForm.strategy_version_id = ""; await client.invalidateQueries({ queryKey: ["paper"] }); ui.notify("模拟账户已创建"); }, onError: notifyError });
+const benchmark = useMutation({ mutationFn: () => api<{ benchmark_count: number }>("/api/paper/benchmarks/refresh", { method: "POST", ...openApiJsonBody<"PaperBenchmarkRefresh">({ account_id: data.value?.account?.account_id, as_of: data.value?.benchmark_comparison?.as_of || data.value?.as_of }) }), onSuccess: async (result) => { ui.notify(`已更新 ${result.benchmark_count} 个指数基准`); await reload(); }, onError: notifyError });
+const full = useMutation({ mutationFn: () => api<DailyBatch & { reused: boolean }>("/api/paper/daily-batches", { method: "POST", ...openApiJsonBody<"PaperDailyBatchRequest">({ as_of: null, account_id: selectedAccountId.value, shadow_lookback_days: 240, shadow_batch_size: 20, top_n: 5, hold_rank_buffer: 30, research_lookback_days: 730, financial_download_limit: 2, announcement_download_limit: 3, depth: "quick" }) }), onSuccess: (result) => { batchId.value = result.batch_id; ui.notify(result.reused ? "已复用每日完整批次" : "完整批次已开始"); startPoll(); }, onError: notifyError });
+const createAccount = useMutation({
+  mutationFn: () => {
+    return api<PaperAccount>("/api/paper/accounts", {
+      method: "POST",
+      ...jsonBody({
+        name: accountForm.name,
+        initial_cash: accountForm.initial_cash,
+        strategy_name: accountForm.strategy_selection,
+      }),
+    });
+  },
+  onSuccess: async (account) => {
+    selectedAccountId.value = account.account_id;
+    showAccountForm.value = false;
+    accountForm.name = "";
+    await client.invalidateQueries({ queryKey: ["paper"] });
+    ui.notify("模拟账户已创建");
+  },
+  onError: notifyError,
+});
+const archiveAccount = useMutation({
+  mutationFn: (accountId: string) => api(`/api/paper/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" }),
+  onSuccess: async () => {
+    selectedAccountId.value = "";
+    await client.invalidateQueries({ queryKey: ["paper"] });
+    selectedAccountId.value = accounts.data.value?.items[0]?.account_id || "";
+    ui.notify("模拟账户已停用，历史记录已保留");
+  },
+  onError: notifyError,
+});
 const batch = useQuery({ queryKey: computed(() => ["paper", "batch", batchId.value]), queryFn: () => api<DailyBatch>(`/api/paper/daily-batches/${batchId.value}`), enabled: computed(() => Boolean(batchId.value)) });
 function notifyError(error: Error) { ui.notify(error.message); }
+function confirmArchiveAccount() {
+  const account = accounts.data.value?.items.find((item) => item.account_id === selectedAccountId.value);
+  if (!account || !window.confirm(`确认停用模拟账户“${account.name}”？订单、持仓、净值和审批历史将保留。`)) return;
+  archiveAccount.mutate(account.account_id);
+}
 function startPoll() { window.clearInterval(poll.value); poll.value = window.setInterval(async () => { const result = await batch.refetch(); if (["completed", "failed"].includes(result.data?.status || "")) { window.clearInterval(poll.value); reload(result.data?.status === "completed" ? "完整批次已完成" : "完整批次执行失败"); } }, 2000); }
-watch([selectedAccountId, asOf], startRealtimePolling);
+watch(selectedAccountId, startRealtimePolling);
 onMounted(() => { document.addEventListener("visibilitychange", handleVisibilityChange); startRealtimePolling(); });
 onBeforeUnmount(() => { window.clearInterval(poll.value); window.clearInterval(realtimePoll.value); document.removeEventListener("visibilitychange", handleVisibilityChange); });
 const settlementReasonLabels: Record<string, string> = {
@@ -163,7 +220,7 @@ async function settle() {
     ui.notify(result.filled.length ? `实时成交 ${result.filled.length} 条${detail}` : `未产生成交${detail}`);
   } catch (error) { notifyError(error as Error); }
 }
-async function review(id: string, decision: string) { try { await api(`/api/paper/orders/${encodeURIComponent(id)}/${decision}`, { method: "POST", ...openApiJsonBody<"PaperOrderReview">({ reviewer: "human", note: "人工确认模拟订单" }) }); await reload(decision === "approve" ? "订单已批准" : "订单已拒绝"); } catch (error) { notifyError(error as Error); } }
+async function review(id: string, decision: string) { try { await api(`/api/paper/orders/${encodeURIComponent(id)}/${decision}`, { method: "POST", ...openApiJsonBody<"PaperOrderReview">({}) }); await reload(decision === "approve" ? "订单已批准" : "订单已拒绝"); } catch (error) { notifyError(error as Error); } }
 function openTargetTrace(item: PaperTarget) { trace.value = item; }
 function openOrderTrace(order: PaperOrder) { trace.value = { ...(targetByCode.value.get(order.security_code) || { security_code: order.security_code, security_name: order.security_name || order.security_code }), order, run: data.value?.runs.find((run) => run.run_id === order.run_id) || { run_id: order.run_id, status: order.run_status, as_of: order.as_of, orders: [] } }; }
 </script>
@@ -172,20 +229,27 @@ function openOrderTrace(order: PaperOrder) { trace.value = { ...(targetByCode.va
   <PageHeader eyebrow="PAPER TRADING DESK" title="模拟盘" description="账户、持仓、当前策略与模拟成交。">
     <label for="paper-account">账户<select id="paper-account" v-model="selectedAccountId"><option v-for="item in accounts.data.value?.items||[]" :key="item.account_id" :value="item.account_id">{{ item.name }}</option></select></label>
     <button class="icon-button" title="新建模拟账户" aria-label="新建模拟账户" @click="showAccountForm=!showAccountForm"><Plus :size="15" /></button>
-    <label for="paper-as-of">研究日<input id="paper-as-of" v-model="asOf" type="date" /></label>
-    <button class="button secondary" :disabled="assess.isPending.value || (!asOf && !latestResearchContractReady)" :title="!asOf && !latestResearchContractReady ? '最新 Current Shadow 与因子快照日期未对齐' : '研究候选'" @click="assess.mutate()"><Search :size="14" />研究候选</button>
-    <button class="button secondary" :disabled="daily.isPending.value" @click="daily.mutate()"><Play :size="14" />运行研究</button>
-    <button class="button" :disabled="full.isPending.value" @click="full.mutate()"><Play :size="14" />运行完整批次</button>
-    <button class="icon-button" title="立即刷新实时行情" aria-label="立即刷新实时行情" :disabled="realtimeRefreshing" @click="refreshRealtime(true)"><RefreshCw :size="15" :class="{ spinning: realtimeRefreshing }" /></button>
+    <button class="icon-button" title="停用当前模拟账户" aria-label="停用当前模拟账户" :disabled="!selectedAccountId || archiveAccount.isPending.value" @click="confirmArchiveAccount"><Trash2 :size="15" /></button>
+    <button class="button secondary" :disabled="!selectedAccountId || assess.isPending.value || !latestResearchContractReady" :title="!latestResearchContractReady ? '最新 Current Shadow 与因子快照日期未对齐' : '研究候选'" @click="assess.mutate()"><Search :size="14" />研究候选</button>
+    <button class="button secondary" :disabled="!selectedAccountId || daily.isPending.value" @click="daily.mutate()"><Play :size="14" />运行研究</button>
+    <button class="button" :disabled="!selectedAccountId || full.isPending.value" @click="full.mutate()"><Play :size="14" />运行完整批次</button>
+    <button class="icon-button" title="立即刷新实时行情" aria-label="立即刷新实时行情" :disabled="!selectedAccountId || realtimeRefreshing" @click="refreshRealtime(true)"><RefreshCw :size="15" :class="{ spinning: realtimeRefreshing }" /></button>
   </PageHeader>
-  <section v-if="showAccountForm" class="content-band white account-create-band"><form class="account-form" @submit.prevent="createAccount.mutate()"><label for="new-account-name">账户名称<input id="new-account-name" v-model="accountForm.name" required maxlength="80" /></label><label for="new-account-capital">初始资金<input id="new-account-capital" v-model.number="accountForm.initial_cash" type="number" min="1" max="1000000000" required /></label><label for="new-account-version">已发布策略版本<select id="new-account-version" v-model="accountForm.strategy_version_id"><option value="">使用内置策略</option><option v-for="item in strategyVersions.data.value?.items||[]" :key="item.strategy_version_id" :value="item.strategy_version_id">{{ item.name }} · v{{ item.version }}</option></select></label><label v-if="!accountForm.strategy_version_id" for="new-account-strategy">内置策略<select id="new-account-strategy" v-model="accountForm.strategy_id"><option v-for="item in strategies.data.value?.items||[]" :key="item.strategy_id" :value="item.strategy_id">{{ item.name }}</option></select></label><label for="new-account-benchmark">基准<select id="new-account-benchmark" v-model="accountForm.benchmark_code"><option value="000300.SH">沪深300</option><option value="000905.SH">中证500</option><option value="000852.SH">中证1000</option></select></label><button class="button" type="submit" :disabled="createAccount.isPending.value"><Plus :size="14" />创建账户</button></form></section>
-  <AsyncState :loading="dashboard.isPending.value" :error="dashboard.error.value" @retry="dashboard.refetch()">
+  <section v-if="showAccountForm" class="content-band white account-create-band">
+    <form class="account-form" @submit.prevent="createAccount.mutate()">
+      <label for="new-account-name">账户名称<input id="new-account-name" v-model="accountForm.name" required maxlength="80" /></label>
+      <label for="new-account-capital">初始资金<input id="new-account-capital" v-model.number="accountForm.initial_cash" type="number" min="1" max="1000000000" required /></label>
+      <label for="new-account-strategy-selection">策略选择<select id="new-account-strategy-selection" v-model="accountForm.strategy_selection" required><option v-for="item in strategyChoices" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
+      <button class="button" type="submit" :disabled="createAccount.isPending.value || !strategyChoices.length"><Plus :size="14" />创建账户</button>
+    </form>
+  </section>
+  <AsyncState :loading="pageLoading" :error="pageError" :empty="noAccounts" empty-text="暂无模拟账户，请点击上方 + 创建账户" @retry="retryPageLoad">
     <section class="strategy-ledger"><div><span>当前账户</span><b>{{ data?.account?.name || '—' }}</b><small>{{ data?.account?.status === 'active' ? '运行中' : data?.account?.status || '—' }}</small></div><div><span>当前策略</span><b>{{ activeStrategy?.name || '—' }}</b><small>{{ activeStrategy?.config?.auto_run ? `每日 ${activeStrategy?.config?.run_time || '18:10'} 自动运行` : '手动运行' }}</small></div><div><span>仓位模式</span><b>{{ activeStrategy?.config?.exposure_mode === 'dynamic' ? '动态仓位' : '固定仓位' }}</b><small v-if="activeStrategy?.config?.exposure_mode === 'dynamic'">{{ pct(Number(activeStrategy?.config?.minimum_exposure || 0)) }} - {{ pct(Number(activeStrategy?.config?.maximum_exposure || 0)) }}</small><small v-else>目标 {{ pct(Number(activeStrategy?.config?.target_gross_exposure || 0)) }}</small></div></section>
     <MetricStrip :items="metrics" />
     <PaperPerformanceSection :account-id="data?.account?.account_id" :comparison="data?.benchmark_comparison" :rows="performanceRows" :series="comparisonSeries" :realtime-error="realtimeError" :refreshing="benchmark.isPending.value" @refresh="benchmark.mutate()" />
-    <section class="content-band white"><div class="section-heading"><div><span>RESEARCH TARGETS</span><b>Shadow 候选与研究判断</b></div><small>{{ targets.data.value?.targets?.length||0 }} 个目标</small></div><div class="list"><article v-if="!asOf && !latestResearchContractReady" class="list-item"><header><h3>研究合同未对齐</h3><span class="status warn">WAIT</span></header><p>Current Shadow {{ data?.latest_shadow?.as_of || '缺失' }} · 因子快照 {{ featureSnapshot.data.value?.as_of || '缺失' }}。请生成同日完整批次，或明确选择已有共同快照的研究日。</p></article><article v-for="item in targets.data.value?.targets||[]" :key="item.security_code" class="list-item"><header><div><span class="status">#{{ item.shadow_rank||'—' }}</span><h3 style="margin-top:8px">{{ item.security_name }} · {{ item.security_code }}</h3></div><span :class="['status',item.current_research_status==='veto'?'fail':item.current_research_status==='defer'?'warn':'']">{{ item.current_research_status||'未研究' }}</span></header><p>{{ item.target_reason }} · score {{ item.score }}</p><footer><button class="button secondary" @click="openTargetTrace(item)"><Search :size="13" />决策依据</button></footer></article><article v-if="(asOf || latestResearchContractReady) && !targets.data.value?.targets?.length" class="list-item"><p>当前没有可研究的 Shadow 目标。</p></article></div></section>
+    <section class="content-band white"><div class="section-heading"><div><span>RESEARCH TARGETS</span><b>Shadow 候选与研究判断</b></div><small>{{ targets.data.value?.targets?.length||0 }} 个目标</small></div><div class="list"><article v-if="!latestResearchContractReady" class="list-item"><header><h3>最新研究合同未对齐</h3><span class="status warn">WAIT</span></header><p>Current Shadow {{ data?.latest_shadow?.as_of || '缺失' }} · 因子快照 {{ featureSnapshot.data.value?.as_of || '缺失' }}。请运行最新完整批次。</p></article><article v-for="item in targets.data.value?.targets||[]" :key="item.security_code" class="list-item"><header><div><span class="status">#{{ item.shadow_rank||'—' }}</span><h3 style="margin-top:8px">{{ item.security_name }} · {{ item.security_code }}</h3></div><span :class="['status',item.current_research_status==='veto'?'fail':item.current_research_status==='defer'?'warn':'']">{{ item.current_research_status||'未研究' }}</span></header><p>{{ item.target_reason }} · score {{ item.score }}</p><footer><button class="button secondary" @click="openTargetTrace(item)"><Search :size="13" />决策依据</button></footer></article><article v-if="latestResearchContractReady && !targets.data.value?.targets?.length" class="list-item"><p>当前没有可研究的 Shadow 目标。</p></article></div></section>
     <section v-if="batchId" class="content-band batch-summary"><div class="section-heading"><div><span>RUN STATUS</span><b>批次执行状态</b></div><span :class="['status',currentBatch?.status==='failed'?'fail':currentBatch?.status==='completed'?'':'warn']">{{ currentBatch?.status||'queued' }}</span></div><div class="batch-overview"><div><span>进度</span><b>{{ completedBatchSteps }} / {{ batchSteps.length }}</b></div><div><span>当前步骤</span><b>{{ currentBatch?.current_step || (currentBatch?.status==='completed'?'全部完成':'等待执行') }}</b></div><div><span>研究日</span><small>{{ currentBatch?.as_of || '—' }}</small></div></div><ol v-if="batchSteps.length" class="batch-step-list"><li v-for="step in batchSteps" :key="step.step_name"><span :class="['status',step.status==='failed'?'fail':step.status==='completed'?'':'warn']">{{ step.status }}</span><b>{{ step.step_name }}</b><small v-if="step.error">{{ step.error }}</small></li></ol></section>
-    <PaperOrdersSection :orders="orderLedger.data.value?.items || []" :latest-run-id="orderLedger.data.value?.latest_run_id" :latest-as-of="orderLedger.data.value?.latest_as_of" @settle="settle" @trace="openOrderTrace" @review="review" />
+    <PaperOrdersSection :orders="ledgerRows" :latest-run-id="orderLedger.data.value?.latest_run_id" :latest-as-of="orderLedger.data.value?.latest_as_of" @settle="settle" @trace="openOrderTrace" @review="review" />
     <PaperPositionsSection :positions="data?.positions || []" />
   </AsyncState>
   <button v-if="trace" class="drawer-backdrop" aria-label="关闭决策依据" @click="trace=null" />
@@ -194,7 +258,7 @@ function openOrderTrace(order: PaperOrder) { trace.value = { ...(targetByCode.va
 
 <style scoped>
 .account-create-band { border-top: 0; }
-.account-form { display: grid; grid-template-columns: minmax(160px, 1.2fr) repeat(4, minmax(140px, 1fr)) auto; gap: 12px; align-items: end; }
+.account-form { display: grid; grid-template-columns: minmax(220px, 1.2fr) minmax(180px, .8fr) minmax(280px, 1.4fr) auto; gap: 12px; align-items: end; }
 .strategy-ledger { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--line); background: #18201d; color: #f2f3ed; }
 .strategy-ledger > div { min-width: 0; padding: 17px 22px; border-right: 1px solid rgba(255,255,255,.14); }
 .strategy-ledger > div:last-child { border-right: 0; }

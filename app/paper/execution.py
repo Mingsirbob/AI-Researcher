@@ -97,19 +97,18 @@ class PaperExecutionMixin:
         scope: dict[str, list[str]] = {
             code: ["benchmark_comparison"] for code in PAPER_BENCHMARKS
         }
-        scope.setdefault(account["benchmark_code"], []).append("account_benchmark")
         with self.paper_store.connect() as conn:
             positions = conn.execute(
                 "SELECT security_code FROM paper_position WHERE account_id=? AND quantity>0",
                 (account["account_id"],),
             ).fetchall()
             pending_sql = (
-                "SELECT DISTINCT security_code FROM paper_order "
+                "SELECT DISTINCT security_code FROM paper_proposal "
                 "WHERE account_id=? AND status='approved'"
             )
             pending_params: list[str] = [account["account_id"]]
             if approved_run_id:
-                pending_sql += " AND run_id=?"
+                pending_sql += " AND run_key=?"
                 pending_params.append(approved_run_id)
             pending = conn.execute(pending_sql, pending_params).fetchall()
         for row in positions:
@@ -172,23 +171,7 @@ class PaperExecutionMixin:
                 invalid.append({"security_code": code, "issues": issues})
                 continue
             purposes = sorted(set(scope.get(code, ["unknown"])))
-            payload = {**quote, "account_id": account["account_id"], "purpose": purposes}
-            snapshot_hash = canonical_hash(payload, compact=False)
-            snapshot_id = snapshot_hash
-            with self.paper_store.connect() as conn:
-                conn.execute(
-                    """INSERT OR IGNORE INTO paper_realtime_quote
-                    (snapshot_id, account_id, security_code, quote_time, trading_date, received_at,
-                     open, latest, high, low, volume, amount, previous_close, source,
-                     purpose_json, snapshot_hash, raw_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (snapshot_id, account["account_id"], code, quote["quote_time"], quote["trading_date"],
-                     received_at, quote["open"], quote["latest"], quote["high"], quote["low"],
-                     quote["volume"], quote["amount"], quote["previous_close"], quote["source"],
-                     json.dumps(purposes, ensure_ascii=False), snapshot_hash,
-                     json.dumps(raw_quote, ensure_ascii=False, sort_keys=True)),
-                )
-            saved.append({**quote, "snapshot_id": snapshot_id, "purpose": purposes})
+            saved.append({**quote, "purpose": purposes})
         missing = sorted(set(scope) - returned_codes)
         return {
             "account_id": account["account_id"],
@@ -199,36 +182,6 @@ class PaperExecutionMixin:
             "invalid_quotes": invalid,
             "source": "iFinD THS_RQ",
         }
-
-    def _latest_realtime_quotes(self, account_id: str, codes: list[str] | None = None) -> list[dict]:
-        params: list[Any] = [account_id]
-        code_filter = ""
-        if codes:
-            code_filter = f" AND security_code IN ({','.join('?' for _ in codes)})"
-            params.extend(codes)
-        with self.paper_store.connect() as conn:
-            rows = conn.execute(
-                f"""SELECT q.*
-                FROM paper_realtime_quote q
-                JOIN (
-                    SELECT account_id, security_code, MAX(received_at) AS received_at
-                    FROM paper_realtime_quote
-                    WHERE account_id=? {code_filter}
-                    GROUP BY account_id, security_code
-                ) latest
-                  ON latest.account_id=q.account_id
-                 AND latest.security_code=q.security_code
-                 AND latest.received_at=q.received_at
-                ORDER BY q.security_code""",
-                params,
-            ).fetchall()
-        items = []
-        for row in rows:
-            item = dict(row)
-            item["purpose"] = json.loads(item.pop("purpose_json"))
-            item.pop("raw_json", None)
-            items.append(item)
-        return items
 
     def _security_metadata(self, codes: list[str]) -> dict[str, dict]:
         unique_codes = sorted(set(codes))
@@ -290,95 +243,76 @@ class PaperExecutionMixin:
                   price_overrides: dict[str, dict] | None = None) -> dict:
         positions = self._positions(account["account_id"], trading_date, price_overrides=price_overrides)
         market_value = sum(item["market_value"] or 0 for item in positions)
-        nav = account["cash"] + market_value
+        nav = account["current_cash"] + market_value
         with self.paper_store.connect() as conn:
             prior = conn.execute(
                 "SELECT * FROM paper_nav_snapshot WHERE account_id=? AND trading_date<? ORDER BY trading_date DESC LIMIT 1",
                 (account["account_id"], trading_date),
             ).fetchone()
             peak_row = conn.execute(
-                "SELECT MAX(nav) FROM paper_nav_snapshot WHERE account_id=? AND trading_date<?",
+                "SELECT MAX(total_equity) FROM paper_nav_snapshot WHERE account_id=? AND trading_date<?",
                 (account["account_id"], trading_date),
             ).fetchone()
-            previous_nav = prior["nav"] if prior else account["initial_cash"]
+            previous_nav = prior["total_equity"] if prior else account["initial_cash"]
             peak = max(float(peak_row[0] or account["initial_cash"]), nav)
             daily_return = nav / previous_nav - 1 if previous_nav else None
             cumulative_return = nav / account["initial_cash"] - 1
             drawdown = nav / peak - 1 if peak else 0.0
             conn.execute(
                 """INSERT INTO paper_nav_snapshot
-                (account_id, trading_date, cash, market_value, nav, daily_return,
-                 cumulative_return, benchmark_return, excess_return, drawdown,
+                (account_id, trading_date, current_cash, market_value, total_equity, daily_return,
+                 cumulative_return, drawdown,
                  gross_exposure, turnover, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id, trading_date) DO UPDATE SET
-                cash=excluded.cash, market_value=excluded.market_value, nav=excluded.nav,
+                current_cash=excluded.current_cash, market_value=excluded.market_value,
+                total_equity=excluded.total_equity,
                 daily_return=excluded.daily_return, cumulative_return=excluded.cumulative_return,
                 drawdown=excluded.drawdown, gross_exposure=excluded.gross_exposure,
                 turnover=paper_nav_snapshot.turnover + excluded.turnover,
                 created_at=excluded.created_at""",
-                (account["account_id"], trading_date, account["cash"], market_value, nav,
+                (account["account_id"], trading_date, account["current_cash"], market_value, nav,
                  daily_return, cumulative_return, drawdown, market_value / nav if nav else 0,
                  turnover, utc_now()),
             )
-        return {"trading_date": trading_date, "cash": account["cash"], "market_value": market_value,
-                "nav": nav, "daily_return": daily_return, "cumulative_return": cumulative_return,
+        return {"trading_date": trading_date, "current_cash": account["current_cash"],
+                "cash": account["current_cash"], "market_value": market_value,
+                "total_equity": nav, "nav": nav, "daily_return": daily_return, "cumulative_return": cumulative_return,
                 "drawdown": drawdown, "gross_exposure": market_value / nav if nav else 0,
-                "turnover": turnover, "benchmark_return": None, "excess_return": None}
-
-    def _run_for_date(self, account_id: str, as_of: str, strategy_version: str) -> dict | None:
-        with self.paper_store.connect() as conn:
-            row = conn.execute(
-                "SELECT run_id FROM paper_daily_run WHERE account_id=? AND as_of=? AND strategy_version=?",
-                (account_id, as_of, strategy_version),
-            ).fetchone()
-        return self.run(row["run_id"]) if row else None
+                "turnover": turnover}
 
     def _latest_active_run_id(self, account_id: str) -> str | None:
         with self.paper_store.connect() as conn:
             row = conn.execute(
-                """SELECT run_id FROM paper_daily_run
-                   WHERE account_id=? AND status<>'superseded'
-                   ORDER BY as_of DESC, created_at DESC LIMIT 1""",
+                """SELECT run_key FROM paper_proposal WHERE account_id=?
+                   ORDER BY proposal_date DESC, proposal_id DESC LIMIT 1""",
                 (account_id,),
             ).fetchone()
-        return row["run_id"] if row else None
-
-    def _supersede_prior_runs(
-        self, account_id: str, as_of: str, active_run_id: str, strategy_version: str
-    ) -> None:
-        now = utc_now()
-        with self.paper_store.connect() as conn:
-            conn.execute(
-                """UPDATE paper_order SET status='cancelled',
-                   review_note=COALESCE(review_note || '；', '') || ?,
-                   reviewed_at=COALESCE(reviewed_at, ?)
-                   WHERE account_id=? AND run_id<>? AND status IN ('proposed','approved')
-                     AND fill_date IS NULL
-                     AND run_id IN (SELECT run_id FROM paper_daily_run WHERE account_id=? AND as_of<=?)""",
-                (f'已由 {strategy_version} 最新批次替代', now, account_id, active_run_id, account_id, as_of),
-            )
-            conn.execute(
-                """UPDATE paper_daily_run SET status='superseded'
-                   WHERE account_id=? AND as_of<=? AND run_id<>? AND status<>'completed'""",
-                (account_id, as_of, active_run_id),
-            )
+        return row["run_key"] if row else None
 
     def run(self, run_id: str) -> dict:
+        manifest = self.run_store.manifest(run_id)
         with self.paper_store.connect() as conn:
-            row = conn.execute("SELECT * FROM paper_daily_run WHERE run_id=?", (run_id,)).fetchone()
             orders = conn.execute(
-                """SELECT * FROM paper_order WHERE run_id=?
-                   ORDER BY CASE side WHEN 'sell' THEN 0 ELSE 1 END, created_at""",
+                """SELECT * FROM paper_proposal WHERE run_key=?
+                   ORDER BY CASE side WHEN 'sell' THEN 0 ELSE 1 END, proposal_id""",
                 (run_id,),
             ).fetchall()
-        if row is None:
-            raise KeyError("模拟研究批次不存在")
         metadata = self._security_metadata([order["security_code"] for order in orders])
-        item = self._decode_json(dict(row), "config", "market_summary")
-        item["orders"] = []
-        for order in orders:
-            decoded = self._decode_json(dict(order), "reason")
+        result_path = self.run_store.path(run_id) / "order_proposals.json"
+        details = json.loads(result_path.read_text(encoding="utf-8")) if result_path.is_file() else {"orders": []}
+        detail_rows = details.get("orders", [])
+        item = {
+            **manifest, "run_id": run_id, "as_of": manifest["trading_date"],
+            "strategy_version": f'{manifest.get("strategy", {}).get("strategy_id", "unknown")}@{manifest.get("strategy", {}).get("version", "")}',
+            "orders": [],
+        }
+        for index, order in enumerate(orders):
+            decoded = dict(order)
+            decoded["order_id"] = decoded["proposal_id"]
+            if index < len(detail_rows):
+                decoded["target_weight"] = detail_rows[index].get("target_weight")
+                decoded["reason"] = detail_rows[index].get("reason", {})
             decoded["security_name"] = (
                 metadata.get(decoded["security_code"], {}).get("security_name")
                 or decoded["security_code"]
@@ -390,60 +324,70 @@ class PaperExecutionMixin:
         account = self.account(account_id) if account_id else self.default_account()
         with self.paper_store.connect() as conn:
             latest_run = conn.execute(
-                """SELECT run_id, as_of FROM paper_daily_run
-                   WHERE account_id=? AND status<>'superseded'
-                   ORDER BY as_of DESC, created_at DESC LIMIT 1""",
+                """SELECT run_key, proposal_date FROM paper_proposal WHERE account_id=?
+                   ORDER BY proposal_date DESC, proposal_id DESC LIMIT 1""",
                 (account["account_id"],),
             ).fetchone()
             rows = conn.execute(
-                """SELECT o.*, r.as_of, r.status AS run_status, r.strategy_version
-                   FROM paper_order o
-                   JOIN paper_daily_run r ON r.run_id=o.run_id
-                   WHERE o.account_id=?
-                   ORDER BY r.as_of DESC,
-                            CASE o.side WHEN 'sell' THEN 0 ELSE 1 END,
-                            o.created_at DESC
-                   LIMIT ?""",
+                """SELECT * FROM paper_proposal WHERE account_id=?
+                   ORDER BY proposal_date DESC, proposal_id DESC LIMIT ?""",
                 (account["account_id"], limit),
             ).fetchall()
-        metadata = self._security_metadata([row["security_code"] for row in rows])
+            trades = conn.execute(
+                """SELECT * FROM paper_trade WHERE account_id=?
+                   ORDER BY traded_at DESC, trade_id DESC LIMIT ?""",
+                (account["account_id"], limit),
+            ).fetchall()
+        metadata = self._security_metadata(
+            [row["security_code"] for row in rows] + [row["security_code"] for row in trades]
+        )
         items = []
         for row in rows:
-            item = self._decode_json(dict(row), "reason")
+            item = dict(row)
+            item.update({"order_id": item["proposal_id"], "run_id": item["run_key"],
+                         "as_of": item["proposal_date"], "run_status": self.run(item["run_key"])["status"]})
             item["security_name"] = (
                 metadata.get(item["security_code"], {}).get("security_name")
                 or item["security_code"]
             )
             items.append(item)
+        trade_items = []
+        for row in trades:
+            item = dict(row)
+            item["security_name"] = (
+                metadata.get(item["security_code"], {}).get("security_name")
+                or item["security_code"]
+            )
+            trade_items.append(item)
         return {
             "account_id": account["account_id"],
-            "latest_run_id": latest_run["run_id"] if latest_run else None,
-            "latest_as_of": latest_run["as_of"] if latest_run else None,
-            "items": items,
+            "latest_run_id": latest_run["run_key"] if latest_run else None,
+            "latest_as_of": latest_run["proposal_date"] if latest_run else None,
+            "items": items, "proposals": items,
+            "trades": trade_items,
         }
 
-    def review_order(self, order_id: str, decision: str, reviewer: str, note: str) -> dict:
+    def review_order(
+        self, order_id: str, decision: str, _reviewer: str = "", _note: str = ""
+    ) -> dict:
         status = "approved" if decision == "approve" else "rejected"
         with self.paper_store.connect() as conn:
-            row = conn.execute("SELECT * FROM paper_order WHERE order_id=?", (order_id,)).fetchone()
+            row = conn.execute("SELECT * FROM paper_proposal WHERE proposal_id=?", (order_id,)).fetchone()
             if row is None:
                 raise KeyError("模拟订单不存在")
             if row["status"] != "proposed":
                 raise ValueError("该订单已经完成审批")
             conn.execute(
-                "UPDATE paper_order SET status=?, reviewer=?, review_note=?, reviewed_at=? WHERE order_id=?",
-                (status, reviewer, note, utc_now(), order_id),
+                "UPDATE paper_proposal SET status=?, reviewed_at=? WHERE proposal_id=?",
+                (status, utc_now(), order_id),
             )
-        self._refresh_run_status(row["run_id"])
-        return self.run(row["run_id"])
+        self._refresh_run_status(row["run_key"])
+        return self.run(row["run_key"])
 
     def _refresh_run_status(self, run_id: str) -> None:
         with self.paper_store.connect() as conn:
-            run = conn.execute("SELECT status FROM paper_daily_run WHERE run_id=?", (run_id,)).fetchone()
-            if run is None or run["status"] == "superseded":
-                return
             statuses = [row[0] for row in conn.execute(
-                "SELECT status FROM paper_order WHERE run_id=?", (run_id,)
+                "SELECT status FROM paper_proposal WHERE run_key=?", (run_id,)
             ).fetchall()]
             if "proposed" in statuses:
                 status = "awaiting_review"
@@ -451,15 +395,11 @@ class PaperExecutionMixin:
                 status = "approved_waiting_execution"
             else:
                 status = "completed"
-            conn.execute("UPDATE paper_daily_run SET status=? WHERE run_id=?", (status, run_id))
+        self.run_store.update_manifest(run_id, status=status)
 
-    def _fill_order(self, account_id: str, order: dict, fill_date: str, open_price: float,
-                    execution_quote_id: str | None = None) -> tuple[dict | None, str | None]:
-        with self.paper_store.connect() as conn:
-            config_row = conn.execute(
-                "SELECT config_json FROM paper_daily_run WHERE run_id=?", (order["run_id"],)
-            ).fetchone()
-        config = json.loads(config_row["config_json"]) if config_row else {}
+    def _fill_order(self, account_id: str, order: dict, fill_date: str,
+                    open_price: float) -> tuple[dict | None, str | None]:
+        config = self.run_store.manifest(order["run_key"]).get("config", {})
         rules = _market_rules(config)
         fill_price = rules.execution_price(order["side"], open_price)
         quantity = int(order["quantity"])
@@ -483,21 +423,21 @@ class PaperExecutionMixin:
                 if is_new_position and max_positions and position_count >= max_positions:
                     return None, "持仓数量上限尚未通过卖出释放"
                 total = gross + fees
-                if fresh_account["cash"] + 1e-8 < total:
+                if fresh_account["current_cash"] + 1e-8 < total:
                     return None, "可用现金不足"
                 old_qty = current["quantity"] if current else 0
                 old_cost = current["average_cost"] if current else 0
                 new_qty = old_qty + quantity
                 avg_cost = (old_qty * old_cost + total) / new_qty
                 conn.execute(
-                    "UPDATE paper_account SET cash=cash-?, updated_at=? WHERE account_id=?",
+                    "UPDATE paper_account SET current_cash=current_cash-?, updated_at=? WHERE account_id=?",
                     (total, utc_now(), account_id),
                 )
                 conn.execute(
                     """INSERT INTO paper_position
                     (account_id, security_code, quantity, available_quantity, average_cost,
-                     realized_pnl, last_buy_date, updated_at)
-                    VALUES (?, ?, ?, 0, ?, 0, ?, ?)
+                     last_buy_date, updated_at)
+                    VALUES (?, ?, ?, 0, ?, ?, ?)
                     ON CONFLICT(account_id, security_code) DO UPDATE SET
                     quantity=?, average_cost=?, last_buy_date=?, updated_at=?""",
                     (account_id, order["security_code"], quantity, avg_cost, fill_date, utc_now(),
@@ -507,28 +447,39 @@ class PaperExecutionMixin:
                 if current is None or current["available_quantity"] < quantity:
                     return None, "可卖数量不足"
                 proceeds = gross - fees
-                realized = (fill_price - current["average_cost"]) * quantity - fees
                 conn.execute(
-                    "UPDATE paper_account SET cash=cash+?, updated_at=? WHERE account_id=?",
+                    "UPDATE paper_account SET current_cash=current_cash+?, updated_at=? WHERE account_id=?",
                     (proceeds, utc_now(), account_id),
                 )
-                conn.execute(
-                    """UPDATE paper_position SET quantity=quantity-?,
-                    available_quantity=available_quantity-?, realized_pnl=realized_pnl+?,
-                    updated_at=? WHERE account_id=? AND security_code=?""",
-                    (quantity, quantity, realized, utc_now(), account_id, order["security_code"]),
-                )
+                if current["quantity"] == quantity:
+                    conn.execute(
+                        "DELETE FROM paper_position WHERE account_id=? AND security_code=?",
+                        (account_id, order["security_code"]),
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE paper_position SET quantity=quantity-?,
+                        available_quantity=available_quantity-?, updated_at=?
+                        WHERE account_id=? AND security_code=?""",
+                        (quantity, quantity, utc_now(), account_id, order["security_code"]),
+                    )
             conn.execute(
-                """UPDATE paper_order SET status='filled', fill_date=?, fill_price=?,
-                gross_amount=?, fees=?, execution_quote_id=? WHERE order_id=?""",
-                (fill_date, fill_price, gross, fees, execution_quote_id, order["order_id"]),
+                """INSERT INTO paper_trade
+                (account_id, security_code, side, quantity, price, fees, traded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (account_id, order["security_code"], order["side"], quantity,
+                 fill_price, fees, fill_date),
             )
-        self._refresh_run_status(order["run_id"])
+            trade_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                "UPDATE paper_proposal SET status='filled' WHERE proposal_id=?",
+                (order["proposal_id"],),
+            )
+        self._refresh_run_status(order["run_key"])
         return {
-            "order_id": order["order_id"], "security_code": order["security_code"],
+            "trade_id": trade_id, "order_id": order["proposal_id"], "security_code": order["security_code"],
             "side": order["side"], "quantity": quantity, "fill_date": fill_date,
             "fill_price": fill_price, "gross_amount": gross, "fees": fees,
-            "execution_quote_id": execution_quote_id,
         }, None
 
     def settle(self, *, execution_date: str, account_id: str | None = None) -> dict:
@@ -542,24 +493,24 @@ class PaperExecutionMixin:
                 (utc_now(), account["account_id"], execution_date),
             )
             rows = conn.execute(
-                """SELECT o.*, r.as_of, r.config_json FROM paper_order o JOIN paper_daily_run r ON r.run_id=o.run_id
-                WHERE o.account_id=? AND o.run_id=? AND o.status='approved' AND r.as_of<?
-                ORDER BY CASE o.side WHEN 'sell' THEN 0 ELSE 1 END, o.created_at""",
+                """SELECT * FROM paper_proposal
+                WHERE account_id=? AND run_key=? AND status='approved' AND proposal_date<?
+                ORDER BY CASE side WHEN 'sell' THEN 0 ELSE 1 END, proposal_id""",
                 (account["account_id"], active_run_id, execution_date),
             ).fetchall()
         for raw in rows:
             order = dict(raw)
             price_item, execution_reason = self._execution_quote(
-                order["security_code"], order["as_of"], execution_date, order["side"],
-                json.loads(order["config_json"]),
+                order["security_code"], order["proposal_date"], execution_date, order["side"],
+                self.run_store.manifest(order["run_key"]).get("config", {}),
             )
             if not price_item:
-                skipped.append({"order_id": order["order_id"], "reason": execution_reason})
+                skipped.append({"order_id": order["proposal_id"], "reason": execution_reason})
                 continue
             fill_date, open_price = price_item
             fill, reason = self._fill_order(account["account_id"], order, fill_date, open_price)
             if reason:
-                skipped.append({"order_id": order["order_id"], "reason": reason})
+                skipped.append({"order_id": order["proposal_id"], "reason": reason})
                 continue
             turnover += fill["gross_amount"]
             filled.append(fill)
@@ -613,31 +564,30 @@ class PaperExecutionMixin:
                 (utc_now(), account["account_id"], execution_date),
             )
             rows = conn.execute(
-                """SELECT o.*, r.as_of, r.config_json FROM paper_order o
-                JOIN paper_daily_run r ON r.run_id=o.run_id
-                WHERE o.account_id=? AND o.run_id=? AND o.status='approved'
-                ORDER BY CASE o.side WHEN 'sell' THEN 0 ELSE 1 END, o.created_at""",
+                """SELECT * FROM paper_proposal
+                WHERE account_id=? AND run_key=? AND status='approved'
+                ORDER BY CASE side WHEN 'sell' THEN 0 ELSE 1 END, proposal_id""",
                 (account["account_id"], active_run_id),
             ).fetchall()
         for raw in rows:
             order = dict(raw)
             quote = quotes.get(order["security_code"])
             if not quote:
-                skipped.append({"order_id": order["order_id"], "reason": "missing_realtime_quote"})
+                skipped.append({"order_id": order["proposal_id"], "reason": "missing_realtime_quote"})
                 continue
             fill_date = quote["trading_date"]
-            if fill_date <= order["as_of"]:
-                skipped.append({"order_id": order["order_id"], "reason": "no_later_trading_day"})
+            if fill_date <= order["proposal_date"]:
+                skipped.append({"order_id": order["proposal_id"], "reason": "no_later_trading_day"})
                 continue
             reviewed_at = datetime.fromisoformat(order["reviewed_at"])
             quote_time = datetime.fromisoformat(quote["quote_time"])
             if reviewed_at > quote_time:
-                skipped.append({"order_id": order["order_id"], "reason": "quote_before_approval"})
+                skipped.append({"order_id": order["proposal_id"], "reason": "quote_before_approval"})
                 continue
             if quote["volume"] <= 0:
-                skipped.append({"order_id": order["order_id"], "reason": "suspended_or_preopen_quote"})
+                skipped.append({"order_id": order["proposal_id"], "reason": "suspended_or_preopen_quote"})
                 continue
-            rules = _market_rules(json.loads(order["config_json"]))
+            rules = _market_rules(self.run_store.manifest(order["run_key"]).get("config", {}))
             one_price = abs(quote["high"] - quote["low"]) <= max(abs(quote["latest"]), 1.0) * 1e-8
             if one_price:
                 blocked = rules.tradability_reason(
@@ -649,15 +599,15 @@ class PaperExecutionMixin:
                 )
                 if blocked in {"limit_up", "limit_down"}:
                     skipped.append({
-                        "order_id": order["order_id"],
+                        "order_id": order["proposal_id"],
                         "reason": f"one_price_{blocked}",
                     })
                     continue
             fill, reason = self._fill_order(
-                account["account_id"], order, fill_date, quote["latest"], quote["snapshot_id"]
+                account["account_id"], order, fill_date, quote["latest"]
             )
             if reason:
-                skipped.append({"order_id": order["order_id"], "reason": reason})
+                skipped.append({"order_id": order["proposal_id"], "reason": reason})
                 continue
             turnover += fill["gross_amount"]
             filled.append(fill)

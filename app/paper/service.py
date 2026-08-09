@@ -5,6 +5,7 @@ from .benchmarks import PaperBenchmarkMixin
 from .dashboard import PaperDashboardMixin
 from .execution import PaperExecutionMixin
 from .store import PaperStoreMixin
+from .run_store import PaperRunStore
 
 
 class PaperExecutionService(
@@ -22,10 +23,11 @@ class PaperExecutionService(
         quant_store: QuantStore | None = None,
         strategy_service: Any | None = None,
         stock_pool_store: StockPoolStore | None = None,
+        run_store: PaperRunStore | None = None,
     ) -> None:
         super().__init__(
             repository, store, quote_provider, paper_store, quant_store,
-            strategy_service, stock_pool_store,
+            strategy_service, stock_pool_store, run_store,
         )
         self.portfolio_decision = portfolio_decision or PortfolioDecisionService(
             repository, quant_store or store, store, stock_pool_store=self.stock_pool_store
@@ -69,33 +71,33 @@ class PaperExecutionService(
         max_position_weight: float | None = None,
         max_industry_weight: float | None = None,
         max_pair_correlation: float | None = None,
+        run_key: str | None = None,
     ) -> dict:
         date.fromisoformat(as_of)
         account = self.account(account_id) if account_id else self.default_account()
         strategy = account["strategy"]
         defaults = strategy["config"]
-        deployed = account.get("strategy_deployment") is not None
         top_n = int(defaults.get("top_n", top_n))
         hold_rank_buffer = int(defaults.get("hold_rank_buffer", hold_rank_buffer))
         target_gross_exposure = float(
             defaults.get("target_gross_exposure", DEFAULT_TARGET_GROSS_EXPOSURE)
-            if target_gross_exposure is None or deployed else target_gross_exposure
+            if target_gross_exposure is None else target_gross_exposure
         )
         max_position_weight = float(
             defaults.get("max_position_weight", DEFAULT_MAX_POSITION_WEIGHT)
-            if max_position_weight is None or deployed else max_position_weight
+            if max_position_weight is None else max_position_weight
         )
         max_industry_weight = float(
             defaults.get("max_industry_weight", DEFAULT_MAX_INDUSTRY_WEIGHT)
-            if max_industry_weight is None or deployed else max_industry_weight
+            if max_industry_weight is None else max_industry_weight
         )
         max_pair_correlation = float(
             defaults.get("max_pair_correlation", DEFAULT_MAX_PAIR_CORRELATION)
-            if max_pair_correlation is None or deployed else max_pair_correlation
+            if max_pair_correlation is None else max_pair_correlation
         )
         with self.paper_store.connect() as conn:
             latest_fill = conn.execute(
-                "SELECT MAX(fill_date) FROM paper_order WHERE account_id=? AND status='filled'",
+                "SELECT MAX(substr(traded_at,1,10)) FROM paper_trade WHERE account_id=?",
                 (account["account_id"],),
             ).fetchone()[0]
         if latest_fill and as_of < latest_fill:
@@ -107,21 +109,14 @@ class PaperExecutionService(
             if strategy.get("signal_source") in {"multifactor_linear", "python_code"}
             else self.portfolio_decision.sources(as_of)
         )
-        strategy_version = f'{strategy["strategy_id"]}@{strategy["version"]}'
-        existing = self._run_for_date(account["account_id"], as_of, strategy_version)
-        if existing:
-            self._supersede_prior_runs(
-                account["account_id"], as_of, existing["run_id"], strategy_version
-            )
-            return {**existing, "reused": True}
-
         positions = self._positions(account["account_id"], as_of, shadow["snapshot_id"])
-        run_id, now = str(uuid.uuid4()), utc_now()
+        now = utc_now()
+        strategy_version = f'{strategy["strategy_id"]}@{strategy["version"]}'
         plan = self.portfolio_decision.build_plan(
             account=account,
             positions=positions,
             as_of=as_of,
-            run_id=run_id,
+            run_id=str(uuid.uuid4()),
             created_at=now,
             top_n=top_n,
             hold_rank_buffer=hold_rank_buffer,
@@ -131,50 +126,51 @@ class PaperExecutionService(
             max_pair_correlation=max_pair_correlation,
             strategy=strategy,
         )
-        with self.paper_store.connect() as conn:
-            conn.execute(
-                """INSERT INTO paper_daily_run
-                (run_id, account_id, as_of, factor_snapshot_id, shadow_snapshot_id, strategy_version,
-                 status, config_json, market_summary_json, snapshot_hash, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'awaiting_review', ?, ?, ?, ?)""",
-                (
-                    run_id,
-                    account["account_id"],
-                    as_of,
-                    plan["factor_snapshot_id"],
-                    plan["shadow_snapshot_id"],
-                    plan.get("strategy_version", strategy_version),
-                    json.dumps(plan["config"], ensure_ascii=False, sort_keys=True),
-                    json.dumps(plan["market_summary"], ensure_ascii=False, sort_keys=True),
-                    plan["snapshot_hash"],
-                    now,
-                ),
+        manifest_values = {
+                "status": "awaiting_review",
+                "strategy": {
+                    "strategy_id": strategy["strategy_id"], "name": strategy["name"],
+                    "version": strategy["version"], "compiled_hash": strategy.get("compiled_hash"),
+                },
+                "config": plan["config"],
+                "factor_snapshot_id": plan["factor_snapshot_id"],
+                "shadow_snapshot_id": plan["shadow_snapshot_id"],
+                "snapshot_hash": plan["snapshot_hash"],
+                "market_summary": plan["market_summary"],
+            }
+        if run_key:
+            manifest = self.run_store.update_manifest(run_key, **manifest_values)
+        else:
+            manifest = self.run_store.create(
+                account=account, trading_date=as_of, manifest=manifest_values,
             )
-            conn.executemany(
-                """INSERT INTO paper_order
-                (order_id, run_id, account_id, security_code, side, quantity, reference_price,
-                 target_weight, reason_json, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)""",
-                [
-                    (
-                        order["order_id"],
-                        run_id,
-                        account["account_id"],
-                        order["security_code"],
-                        order["side"],
-                        order["quantity"],
-                        order["reference_price"],
-                        order["target_weight"],
-                        json.dumps(order["reason"], ensure_ascii=False, sort_keys=True),
-                        now,
+        run_key = manifest["run_key"]
+        self.run_store.write_result(run_key, "order_proposals.json", {"orders": plan["orders"]})
+        try:
+            with self.paper_store.connect() as conn:
+                conn.execute(
+                    """UPDATE paper_proposal SET status='cancelled', reviewed_at=COALESCE(reviewed_at, ?)
+                       WHERE account_id=? AND status IN ('proposed','approved')""",
+                    (now, account["account_id"]),
+                )
+                proposal_ids = []
+                for order in plan["orders"]:
+                    cursor = conn.execute(
+                        """INSERT INTO paper_proposal
+                        (account_id, run_key, proposal_date, security_code, side, quantity,
+                         reference_price, status, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', ?)""",
+                        (account["account_id"], run_key, as_of, order["security_code"],
+                         order["side"], order["quantity"], order["reference_price"], now),
                     )
-                    for order in plan["orders"]
-                ],
-            )
-        self._supersede_prior_runs(account["account_id"], as_of, run_id, strategy_version)
-        self._refresh_run_status(run_id)
+                    proposal_ids.append(cursor.lastrowid)
+        except Exception as exc:
+            self.run_store.update_manifest(run_key, status="failed", error=str(exc), finished_at=utc_now())
+            raise
+        self.run_store.update_manifest(run_key, proposal_ids=proposal_ids)
+        self._refresh_run_status(run_key)
         self._mark_nav(account, as_of)
-        return {**self.run(run_id), "reused": False}
+        return {**self.run(run_key), "reused": False}
 
 
 class PaperTradingService(PaperExecutionService):

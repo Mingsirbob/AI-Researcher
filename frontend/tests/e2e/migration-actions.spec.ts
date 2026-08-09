@@ -2,6 +2,24 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 const json = (route: Route, body: unknown) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
 
+test("paper shows an empty-account state after its database is recreated", async ({ page }) => {
+  let dashboardRequests = 0;
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/paper/accounts")) return json(route, { items: [] });
+    if (url.pathname.endsWith("/paper/dashboard")) dashboardRequests += 1;
+    return json(route, { items: [] });
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByText("暂无模拟账户，请点击上方 + 创建账户")).toBeVisible();
+  await expect(page.getByText("正在读取数据")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "运行研究" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "运行完整批次" })).toBeDisabled();
+  expect(dashboardRequests).toBe(0);
+});
+
 test("backtest renders run-level metrics and the current rebalance contract", async ({ page }) => {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -67,6 +85,7 @@ test("daily research candidate action posts without touching the real database",
 
 test("paper switches account strategies and creates an isolated account", async ({ page }) => {
   let created: Record<string, unknown> | null = null;
+  let archivedAccountId = "";
   const strategyById = {
     lightgbm_shadow_v1: { strategy_id: "lightgbm_shadow_v1", version: "1.0.0", name: "LightGBM Shadow", signal_source: "current_shadow", config: { target_gross_exposure: .5 } },
     multifactor_linear_v1: { strategy_id: "multifactor_linear_v1", version: "1.0.0", name: "线性多因子", signal_source: "multifactor_linear", config: { target_gross_exposure: .8 } },
@@ -74,9 +93,18 @@ test("paper switches account strategies and creates an isolated account", async 
   const account = (id: string, name: string, strategyId: keyof typeof strategyById) => ({ account_id: id, name, initial_cash: 1_000_000, cash: 1_000_000, benchmark_code: "000300.SH", strategy_id: strategyId, strategy: strategyById[strategyId] });
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    if (/\/paper\/accounts\/[^/]+$/.test(url.pathname) && route.request().method() === "DELETE") {
+      archivedAccountId = url.pathname.split("/").at(-1) || "";
+      return route.fulfill({ status: 204 });
+    }
     if (url.pathname.endsWith("/paper/accounts") && route.request().method() === "POST") { created = route.request().postDataJSON(); return json(route, account("account-3", String(created?.name), "multifactor_linear_v1")); }
-    if (url.pathname.endsWith("/paper/accounts")) return json(route, { items: [account("account-1", "模型组合", "lightgbm_shadow_v1"), account("account-2", "因子组合", "multifactor_linear_v1")] });
+    if (url.pathname.endsWith("/paper/accounts")) return json(route, { items: [
+      account("account-1", "模型组合", "lightgbm_shadow_v1"),
+      account("account-2", "因子组合", "multifactor_linear_v1"),
+      ...(created ? [account("account-3", "新因子账户", "multifactor_linear_v1")] : []),
+    ].filter((item) => item.account_id !== archivedAccountId) });
     if (url.pathname.endsWith("/paper/strategies")) return json(route, { items: Object.values(strategyById) });
+    if (url.pathname.endsWith("/strategy-versions")) return json(route, { items: [{ strategy_version_id: "published-1", name: "发布版多因子", version: 1, strategy_kind: "structured" }] });
     if (url.pathname.endsWith("/paper/dashboard")) {
       const id = url.searchParams.get("account_id") || "account-1";
       const selected = id === "account-2" || id === "account-3" ? account(id, id === "account-2" ? "因子组合" : "新因子账户", "multifactor_linear_v1") : account("account-1", "模型组合", "lightgbm_shadow_v1");
@@ -88,13 +116,24 @@ test("paper switches account strategies and creates an isolated account", async 
   });
   await page.goto("/");
   await page.locator("#paper-account").selectOption("account-2");
-  await expect(page.getByText("multifactor_linear_v1 @ 1.0.0")).toBeVisible();
+  await expect(page.getByText("线性多因子", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: "新建模拟账户" }).click();
+  const accountForm = page.locator(".account-form");
+  await expect(accountForm.getByLabel("策略选择")).toBeVisible();
+  await expect(accountForm.getByText("已发布策略版本")).toHaveCount(0);
+  await expect(accountForm.getByText("内置策略")).toHaveCount(0);
+  await expect(accountForm.getByText("基准", { exact: true })).toHaveCount(0);
+  await expect(accountForm.locator("#new-account-strategy-selection option")).toHaveCount(2);
   await page.getByLabel("账户名称").fill("新因子账户");
-  await page.getByLabel("策略").selectOption("multifactor_linear_v1");
+  await page.getByLabel("策略选择").selectOption("线性多因子");
   await page.getByRole("button", { name: "创建账户" }).click();
   await expect.poll(() => created).not.toBeNull();
-  expect(created).toMatchObject({ name: "新因子账户", strategy_id: "multifactor_linear_v1", benchmark_code: "000300.SH" });
+  expect(created).toMatchObject({ name: "新因子账户", initial_cash: 1_000_000, strategy_name: "线性多因子" });
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "停用当前模拟账户" }).click();
+  await expect.poll(() => archivedAccountId).toBe("account-3");
+  await expect(page.locator("#paper-account")).toHaveValue("account-1");
 });
 
 test("paper order review and realtime settlement require explicit clicks", async ({ page }) => {
@@ -114,6 +153,10 @@ test("paper order review and realtime settlement require explicit clicks", async
     if (url.pathname.endsWith("/paper/accounts")) return json(route, { items: [{ account_id: "account-1", name: "审批账户", initial_cash: 1_000_000, cash: 900_000, benchmark_code: "000300.SH", strategy_id: "lightgbm_shadow_v1", strategy: { strategy_id: "lightgbm_shadow_v1", version: "1.0.0", name: "LightGBM Shadow", signal_source: "current_shadow", config: {} } }] });
     if (url.pathname.endsWith("/paper/strategies")) return json(route, { items: [] });
     if (url.pathname.endsWith("/paper/dashboard")) return json(route, { as_of: "2026-07-28", nav: 1_000_000, cumulative_return: 0, cash_weight: .9, account: { account_id: "account-1", name: "审批账户", cash: 900_000, strategy: { strategy_id: "lightgbm_shadow_v1", version: "1.0.0", name: "LightGBM Shadow", signal_source: "current_shadow", config: {} } }, positions: [], runs: [{ run_id: "run-1", status: "proposed", orders: [{ order_id: "order-1", security_code: "300750.SZ", security_name: "宁德时代", side: "BUY", status: "proposed", quantity: 100, reference_price: 250, target_weight: .1 }] }], nav_history: [], benchmark_comparison: { portfolio: null, benchmarks: [], limitations: [] } });
+    if (url.pathname.endsWith("/paper/orders")) {
+      const proposal = { order_id: "order-1", run_id: "run-1", account_id: "account-1", as_of: "2026-07-28", run_status: "awaiting_review", strategy_version: "lightgbm_shadow_v1@1", security_code: "300750.SZ", security_name: "宁德时代", side: "buy", status: "proposed", quantity: 100, reference_price: 250, target_weight: .1, created_at: "2026-07-28T18:00:00+08:00" };
+      return json(route, { account_id: "account-1", latest_run_id: "run-1", latest_as_of: "2026-07-28", items: [proposal], proposals: [proposal], trades: [] });
+    }
     if (url.pathname.endsWith("/factor-snapshots/latest")) return json(route, { snapshot_id: "features-1", as_of: "2026-07-28", status: "completed" });
     if (url.pathname.endsWith("/paper/daily-batches/latest")) return json(route, { item: null });
     return json(route, { items: [] });
@@ -124,15 +167,15 @@ test("paper order review and realtime settlement require explicit clicks", async
   await expect(order).toContainText("宁德时代");
   expect(reviews).toHaveLength(0);
   expect(settlements).toBe(0);
-  await page.getByRole("button", { name: "批准" }).click();
+  await page.getByRole("button", { name: "批准提案" }).click();
   await expect.poll(() => reviews.length).toBe(1);
-  await page.getByRole("button", { name: "拒绝" }).click();
+  await page.getByRole("button", { name: "拒绝提案" }).click();
   await expect.poll(() => reviews.length).toBe(2);
   await page.getByRole("button", { name: "执行模拟撮合" }).click();
   await expect.poll(() => settlements).toBe(1);
   expect(reviews.map((item) => item.path)).toEqual(["/api/paper/orders/order-1/approve", "/api/paper/orders/order-1/reject"]);
-  expect(reviews[0].body).toEqual({ reviewer: "human", note: "人工确认模拟订单" });
-  expect(reviews[1].body).toEqual({ reviewer: "human", note: "人工确认模拟订单" });
+  expect(reviews[0].body).toEqual({});
+  expect(reviews[1].body).toEqual({});
 });
 
 test("factor release keeps an independent review note and submits approval", async ({ page }) => {

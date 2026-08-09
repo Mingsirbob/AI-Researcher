@@ -110,9 +110,7 @@ class FactorNeutralizationRequest(BaseModel):
 class PaperAccountCreate(BaseModel):
     name: str = Field(default="每日模拟组合", min_length=1, max_length=80)
     initial_cash: float = Field(default=1_000_000, gt=0, le=1_000_000_000)
-    benchmark_code: Literal["000300.SH", "000905.SH", "000852.SH"] = "000300.SH"
-    strategy_id: str = Field(default="lightgbm_shadow_v1", min_length=2, max_length=128)
-    strategy_version_id: str | None = Field(default=None, min_length=8, max_length=128)
+    strategy_name: str = Field(min_length=2, max_length=120)
 
 
 class StrategyDraftCreate(BaseModel):
@@ -137,10 +135,6 @@ class StrategyGenerateRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class PaperStrategyDeploymentCreate(BaseModel):
-    strategy_version_id: str = Field(min_length=8, max_length=128)
-
-
 class PaperBenchmarkRefresh(BaseModel):
     account_id: str | None = None
     as_of: str | None = None
@@ -158,8 +152,7 @@ class PaperDailyRunCreate(BaseModel):
 
 
 class PaperOrderReview(BaseModel):
-    reviewer: str = Field(default="human", min_length=1, max_length=80)
-    note: str = Field(default="人工确认模拟订单", min_length=2, max_length=500)
+    pass
 
 
 class PaperSettleRequest(BaseModel):

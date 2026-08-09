@@ -13,16 +13,26 @@ def owns(path: str) -> bool:
 def create_paper_account(request: PaperAccountCreate) -> dict:
     try:
         return paper_trading_service.create_account(
-            request.name, request.initial_cash, request.benchmark_code,
-            request.strategy_id, request.strategy_version_id,
+            request.name, request.initial_cash, request.strategy_name,
         )
-    except KeyError as exc:
+    except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/api/paper/accounts")
 def list_paper_accounts() -> dict:
     return {"items": paper_trading_service.list_accounts()}
+
+
+@router.delete(
+    "/api/paper/accounts/{account_id}",
+    status_code=204,
+    response_class=Response,
+    response_model=None,
+)
+def delete_paper_account(account_id: str) -> None:
+    if not paper_trading_service.archive_account(account_id):
+        raise HTTPException(status_code=404, detail="模拟账户不存在或已停用")
 
 
 @router.get("/api/paper/strategies")
@@ -34,18 +44,6 @@ def list_paper_strategies() -> dict:
 def paper_scheduler_status(request: Request) -> dict:
     scheduler = getattr(request.app.state, "paper_scheduler", None)
     return scheduler.last_result if scheduler else {"status": "disabled"}
-
-
-@router.post("/api/paper/accounts/{account_id}/deployments", status_code=201)
-def deploy_paper_strategy(account_id: str, request: PaperStrategyDeploymentCreate) -> dict:
-    try:
-        return paper_trading_service.deploy_strategy(account_id, request.strategy_version_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/api/paper/dashboard")
@@ -102,9 +100,7 @@ def create_paper_daily_run(request: PaperDailyRunCreate) -> dict:
 @router.post("/api/paper/orders/{order_id}/approve")
 def approve_paper_order(order_id: str, request: PaperOrderReview) -> dict:
     try:
-        return paper_trading_service.review_order(
-            order_id, "approve", request.reviewer, request.note
-        )
+        return paper_trading_service.review_order(order_id, "approve")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -114,9 +110,7 @@ def approve_paper_order(order_id: str, request: PaperOrderReview) -> dict:
 @router.post("/api/paper/orders/{order_id}/reject")
 def reject_paper_order(order_id: str, request: PaperOrderReview) -> dict:
     try:
-        return paper_trading_service.review_order(
-            order_id, "reject", request.reviewer, request.note
-        )
+        return paper_trading_service.review_order(order_id, "reject")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

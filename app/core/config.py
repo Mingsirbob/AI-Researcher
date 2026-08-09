@@ -46,6 +46,7 @@ class Settings:
     stock_hfq_db: Path = ROOT / "data" / "stock_data_hfq.db"
     state_db: Path = ROOT / "data" / "research_state.db"
     paper_db: Path = ROOT / "data" / "paper_trading.db"
+    paper_run_root: Path = ROOT / "data" / "paper"
     quant_db: Path = ROOT / "data" / "quant_research.db"
     document_root: Path = ROOT / "data" / "documents"
     model_artifact_root: Path = ROOT / "data" / "model_artifacts"

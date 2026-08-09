@@ -41,7 +41,6 @@ PAPER_TRADING_TABLES = (
     "paper_order",
     "paper_position",
     "paper_nav_snapshot",
-    "paper_realtime_quote",
     "paper_benchmark_price",
 )
 

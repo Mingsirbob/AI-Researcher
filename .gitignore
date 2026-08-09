@@ -28,6 +28,7 @@ data/backtests
 data/pytest-*/
 data/test_tmp/
 data/strategy_runs/
+data/paper/
 
 
 # Runtime output

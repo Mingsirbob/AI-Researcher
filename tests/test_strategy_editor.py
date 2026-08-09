@@ -74,33 +74,32 @@ def test_draft_compile_and_immutable_publish_without_evidence_gate(tmp_path):
     assert "0033_compact_quant_strategy" in applied_migrations(quant.connect)
 
 
-def test_account_deployment_binds_published_hash(tmp_path):
+def test_account_strategy_name_resolves_published_hash(tmp_path):
     quant, service, paper = _services(tmp_path)
     draft = service.create_draft(
         name="模型与公告", description="研究过滤", template_id="lightgbm_research"
     )
     version = service.publish(draft["draft_id"])
-    account = paper.create_account("策略账户", 1_000_000, "000300.SH")
-    deployment = paper.deploy_strategy(account["account_id"], version["strategy_version_id"])
+    account = paper.create_account("策略账户", 1_000_000, version["name"])
     resolved = paper.account(account["account_id"])
-    assert deployment["compiled_hash"] == version["compiled_hash"]
+    assert resolved["strategy_name"] == version["name"]
+    assert resolved["strategy"]["compiled_hash"] == version["compiled_hash"]
     assert resolved["strategy"]["research_enabled"] is True
-    assert resolved["strategy_deployment"]["strategy_version_id"] == version["strategy_version_id"]
 
 
 def test_system_lightgbm_strategy_is_stored_and_auto_deployed(tmp_path):
     _, service, paper = _services(tmp_path)
-    account = paper.create_account("自动策略账户", 1_000_000, "000300.SH")
+    version = service.version(service.system_lightgbm_version_id)
+    account = paper.create_account("自动策略账户", 1_000_000, version["name"])
 
     resolved = paper.account(account["account_id"])
     strategy = resolved["strategy"]
-    version = service.version(service.system_lightgbm_version_id)
     artifact_path = (
         tmp_path / "strategy_runs" / version["draft_id"] / "v1" / "strategy.json"
     )
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
 
-    assert resolved["strategy_deployment"]["strategy_version_id"] == service.system_lightgbm_version_id
+    assert resolved["strategy_name"] == version["name"]
     assert version["source_path"] == str(artifact_path)
     assert artifact["strategy_version_id"] == version["strategy_version_id"]
     assert artifact["compiled_hash"] == version["compiled_hash"]
@@ -188,14 +187,12 @@ def test_generated_code_strategy_is_versioned_and_written_to_run_dir(tmp_path):
     assert runtime["config"]["filter_pipeline_id"] == "factor_quality_passed"
 
 
-def test_account_can_select_published_strategy_version_at_creation(tmp_path):
+def test_account_can_select_published_strategy_by_name_at_creation(tmp_path):
     _, service, paper = _services(tmp_path)
     draft = service.create_draft(
         name="创建即绑定", description="账户版本选择", template_id="linear_top30"
     )
     version = service.publish(draft["draft_id"])
-    account = paper.create_account(
-        "版本账户", 1_000_000, "000300.SH",
-        strategy_version_id=version["strategy_version_id"],
-    )
-    assert account["strategy_deployment"]["strategy_version_id"] == version["strategy_version_id"]
+    account = paper.create_account("版本账户", 1_000_000, version["name"])
+    assert account["strategy_name"] == version["name"]
+    assert account["strategy"]["strategy_id"] == version["strategy_version_id"]

@@ -20,6 +20,7 @@ from app.decision.outcomes import DecisionOutcomeService
 from app.research.acceptance import EvidenceAcceptanceService
 from app.data.ifind import IFindDataLayer
 from app.paper.service import PaperTradingService
+from app.paper.run_store import PaperRunStore
 from app.quant.factors import FactorSnapshotService
 from app.quant.store import QuantStore
 from app.quant.simple_research import SimpleResearchCatalog
@@ -81,6 +82,7 @@ def create_app_container(app_settings: Settings = settings) -> AppContainer:
     ifind_service = IFindDataLayer(app_settings)
     research_store = ResearchStore(app_settings.state_db, app_settings.document_root)
     paper_store = SQLiteStore(app_settings.paper_db)
+    paper_run_store = PaperRunStore(app_settings.paper_run_root)
     stock_pool_store = StockPoolStore(app_settings.stock_pool_db)
     app_settings.runtime_temp_root.mkdir(parents=True, exist_ok=True)
     stale_before = time.time() - 24 * 60 * 60
@@ -114,6 +116,7 @@ def create_app_container(app_settings: Settings = settings) -> AppContainer:
         quant_store=quant_store,
         strategy_service=strategy_service,
         stock_pool_store=stock_pool_store,
+        run_store=paper_run_store,
         portfolio_decision=PortfolioDecisionService(
             repo,
             quant_store,
@@ -125,9 +128,8 @@ def create_app_container(app_settings: Settings = settings) -> AppContainer:
         ),
     )
     daily_batch_store = DailyBatchStore(
-        paper_store,
+        paper_run_store, account_resolver=paper_trading_service.account,
         event_store=RuntimeEventStore(research_store),
-        legacy_store=research_store,
     )
     return AppContainer(
         settings=app_settings,

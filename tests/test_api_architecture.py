@@ -8,7 +8,7 @@ from app.main import app, domain_routers
 
 
 OPENAPI_BASELINE_SHA256 = (
-    "1c22b69b0d6d131dfb03ecd45788c9cd311d91eff95ae460bd5ab63bd4146ec0"
+    "5cbfb5ff12277fb4bf4d4ace4700326eb3fa9350371e95c4e2a37b319a33058c"
 )
 
 

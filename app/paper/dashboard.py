@@ -9,7 +9,12 @@ class PaperDashboardMixin:
         account = self.account(account_id) if account_id else self.default_account()
         as_of = as_of or self.store.market_data_end()
         latest_shadow = self.quant_store.latest_current_shadow()
-        realtime_quotes = self._latest_realtime_quotes(account["account_id"])
+        realtime_error = None
+        try:
+            realtime_quotes = self.refresh_realtime_quotes(account["account_id"])["quotes"]
+        except Exception as exc:
+            realtime_quotes = []
+            realtime_error = str(exc)
         realtime_by_code = {
             item["security_code"]: item for item in realtime_quotes
             if item["trading_date"] >= as_of
@@ -20,16 +25,13 @@ class PaperDashboardMixin:
             realtime_by_code,
         )
         with self.paper_store.connect() as conn:
-            run_rows = conn.execute(
-                "SELECT run_id FROM paper_daily_run WHERE account_id=? ORDER BY as_of DESC, created_at DESC LIMIT 20",
-                (account["account_id"],),
-            ).fetchall()
             nav_rows = [dict(row) for row in conn.execute(
                 "SELECT * FROM paper_nav_snapshot WHERE account_id=? ORDER BY trading_date",
                 (account["account_id"],),
             ).fetchall()]
-        runs = [self.run(row["run_id"]) for row in run_rows]
-        current_nav = account["cash"] + sum(item["market_value"] or 0 for item in positions)
+        run_items = self.run_store.find(account_id=account["account_id"])[:20]
+        runs = [self.run(item["run_key"]) for item in run_items if item.get("proposal_ids")]
+        current_nav = account["current_cash"] + sum(item["market_value"] or 0 for item in positions)
         max_position_weight = float(account["strategy"]["config"].get("max_position_weight") or 0)
         for item in positions:
             item["weight"] = (item["market_value"] or 0) / current_nav if current_nav else 0
@@ -57,7 +59,7 @@ class PaperDashboardMixin:
         )
         return {"paper_only": True, "account": account, "as_of": as_of, "nav": current_nav,
                 "cumulative_return": current_nav / account["initial_cash"] - 1,
-                "cash_weight": account["cash"] / current_nav if current_nav else 0,
+                "cash_weight": account["current_cash"] / current_nav if current_nav else 0,
                 "positions": positions, "runs": runs, "nav_history": nav_rows,
                 "benchmark_comparison": benchmark_comparison,
                 "latest_shadow": latest_shadow, "realtime_quotes": realtime_quotes,
@@ -68,6 +70,7 @@ class PaperDashboardMixin:
                         (item["quote_time"] for item in realtime_quotes), default=None
                     ),
                     "high_frequency_used": False,
+                    "error": realtime_error,
                 },
                  "limitations": ["仅为模拟盘，不连接真实券商。", "订单在研究日后的首个可用开盘价撮合，包含固定滑点与费用假设。",
                                  "几日收益只能验证流程与短期表现，不能证明策略具有稳定盈利能力。"]}
